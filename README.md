@@ -23,6 +23,62 @@ dataset).
 
     - `run_words.py --train --evaluate --data_path=path_to_the_preprocessed_dataset`  for datasets with token-level rationales (USR Movies, ERASER Movies)
 
+## Noise schedules, noise sources and evaluation controls
+
+`run_words.py` (USR Movies, ERASER Movies) accepts the following on top of the original options. All commands are run from `model`.
+
+**Alignment fix.** The released noise injection paired the selection mask (which has no `[CLS]` position) with word indices that include it, so during training with `--inject_noise` the rationale predictor received the token *before* every selected token. This is fixed by default. Pass `--legacy_alignment` to train exactly as released, e.g. to reproduce published numbers. Models trained without `--inject_noise` are unaffected. `models_ce.py` (MultiRC, FEVER) pairs the mask with word indices the same way; it has not been checked or changed.
+
+### Training
+
+| Option | Effect |
+| --- | --- |
+| `--seed` | Seeds initialization, batch order and noise. |
+| `--legacy_alignment` | Trains with the released (shifted) alignment between selection and predictor input, see above. |
+| `--noise_schedule=constant` | Fixed noise level `--noise_p` (original NI, the default). |
+| `--noise_schedule=exponential\|cosine\|linear` | Open-loop decay from `--noise_p0` to `--noise_p`. `--noise_gamma` is the exponential decay rate **per epoch**. |
+| `--noise_schedule=closed_loop` | PI controller on a degeneracy signal, starting at `--noise_p` and kept within `--noise_p_min`/`--noise_p_max`. `--ctrl_signal=jsd` raises noise when the two predictors disagree on the clean rationale (probed every `--ctrl_probe_every` steps), `--ctrl_signal=entropy` when the generator's attention collapses. `--ctrl_target`, `--ctrl_kp`, `--ctrl_ki` and `--ctrl_ema` set the target, gains and smoothing. |
+| `--noise_source=mlm` | Replaces tokens with in-context substitutes instead of words drawn from the vocabulary. Requires `build_mlm_replacements.py`. |
+| `--replacement_probs=saliency` | Chooses tokens to replace by contextual saliency instead of TF*IDF. Requires `build_saliency_probs.py`. |
+| `--mask_special_tokens` | Keeps `[SEP]` and `[PAD]` out of the attention and of the rationale. Use it for all models of a comparison or for none. |
+| `--train_subset`, `--valid_subset`, `--test_subset` | Use the first documents only, for a fast debugging loop. |
+
+The noise level realized between validations is logged to `checkpoints/metrics.json` (`noise.p_mean`). Validation is always noise-free.
+
+One-time preparation for the options above:
+
+    python run_full_text.py --train --evaluate --data_path=path_to_the_preprocessed_dataset --save_path=trained/full_text
+    python build_mlm_replacements.py --data_path=path_to_the_preprocessed_dataset
+    python build_saliency_probs.py --data_path=path_to_the_preprocessed_dataset --classifier_path=trained/full_text
+
+`run_full_text.py` trains a classifier on the full input: the accuracy ceiling, the source of saliency, and the independent judge of faithfulness below.
+
+### Evaluation
+
+`results.json` keeps the original scores under their original keys and adds:
+
+| Key | Content |
+| --- | --- |
+| `rationales_word_level` | Plausibility over words instead of wordpieces. |
+| `reference` | Expected scores of a random selection and scores of an oracle selection at the same number of selected tokens: the floor and the ceiling of `rationales.micro`. |
+| `plausibility_at_k` | Plausibility of the top-k tokens at every rate in `--eval_sparsities` (default 10%, 20%, 30%). |
+| `selection` | Realized selection rate, share of the selection spent on `[SEP]`/`[PAD]`, rationale length, number and length of spans, share of stopwords and punctuation. |
+| `truncation` | Share of documents cut by `--max_length` and share of human-annotated words that survive it. Annotated words that are cut off are not part of the recall denominator. |
+| `comp_suff_prob` | Comprehensiveness and sufficiency of the rationale predictor computed on probabilities. `comp_suff` applies a sigmoid to probabilities, which confines each term to [0.5, 0.73]. |
+| `faithfulness_judge` | With `--faithfulness_model=trained/full_text/checkpoints/full_text.pt`: comprehensiveness and sufficiency according to the independent classifier, their normalized variants (Carton et al., 2020), and AOPC curves over `--aopc_bins`. |
+
+`--selection_method=random` evaluates a checkpoint with tokens selected uniformly at random (random-mask control). `per_example.json` holds per-document counts.
+
+    python aggregate_results.py --runs ni="trained/ni_seed*" ours="trained/ours_seed*" --baseline=ni
+
+prints mean (std) over runs and a paired bootstrap of the F1 difference against the baseline.
+
+### Tests
+
+    python -m pytest tests
+
+runs offline on CPU with a tiny randomly initialized BERT.
+
 ## USR Movie Review Dataset
 
 The dataset can be found in `usr_movie_review`. It contains the training, validation,

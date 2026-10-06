@@ -10,10 +10,19 @@ from torch.utils.data import DataLoader, Dataset
 from transformers import PreTrainedTokenizerBase
 
 
+REPLACEMENT_PROBS = {
+    "tfidf": "replacement_probs",
+    "saliency": "replacement_probs_saliency"
+}
+
+
 class MovieDataset(Dataset):
-    def __init__(self, data_path, split):
+    def __init__(self, data_path, split, subset = None):
         with open(os.path.join(data_path, f"{split}.jsonl"), "r") as f:
             self.data = [json.loads(line) for line in f.read().splitlines()]
+        # Keep the first documents only (fast debugging loop)
+        if subset is not None:
+            self.data = self.data[:subset]
 
     def __len__(self):
         return len(self.data)
@@ -22,29 +31,32 @@ class MovieDataset(Dataset):
         return self.data[idx]
 
 class MovieDatasetWithReplacementProbs(MovieDataset):
-    def __init__(self, data_path, split, noise_p):
-        super().__init__(data_path = data_path, split = split)
-        with open(os.path.join(data_path, "word_statistics", f"{split}_replacement_probs.pkl"), "rb") as f:
+    def __init__(self, data_path, split, replacement_probs = "tfidf", subset = None):
+        super().__init__(data_path = data_path, split = split, subset = subset)
+        with open(os.path.join(data_path, "word_statistics", f"{split}_{REPLACEMENT_PROBS[replacement_probs]}.pkl"), "rb") as f:
             self.replacement_probs = pickle.load(f)
-        # Finish precomputing replacement probabilities
-        for i, replacement_probs in enumerate(self.replacement_probs):
-            replacement_probs *= noise_p
-            replacement_probs[replacement_probs > 1] = 1
-            self.replacement_probs[i] = replacement_probs
+        # Replacement probabilities are kept unscaled (mean 1 over a document),
+        # the noise level p is applied by the rationale extractor on every step
+        if len(self.replacement_probs) < len(self.data):
+            raise ValueError(f"Replacement probabilities do not cover {split}.jsonl, regenerate the word statistics")
+        for document, replacement_probs in zip(self.data, self.replacement_probs):
+            if len(document[0]) != len(replacement_probs):
+                raise ValueError(f"Replacement probabilities do not match {split}.jsonl, regenerate the word statistics")
 
     def __getitem__(self, idx):
-        return self.data[idx] + [self.replacement_probs[idx]]
+        return self.data[idx] + [self.replacement_probs[idx], idx]
 
 @dataclass
 class MovieDatasetFactory:
     data_path: str
     split: str
-    noise_p: Optional[int] = None
+    replacement_probs: str = "tfidf"
+    subset: Optional[int] = None
 
     def create_dataset(self, inject_noise):
         if inject_noise:
-            return MovieDatasetWithReplacementProbs(self.data_path, self.split, self.noise_p)
-        return MovieDataset(self.data_path, self.split)
+            return MovieDatasetWithReplacementProbs(self.data_path, self.split, self.replacement_probs, self.subset)
+        return MovieDataset(self.data_path, self.split, self.subset)
 
 @dataclass
 class ReviewCollator:
@@ -77,7 +89,7 @@ class ReviewCollator:
 @dataclass
 class ReviewCollatorWithReplacementProbs(ReviewCollator):
     def __call__(self, data):
-        reviews, labels, replacement_probs = zip(*data)
+        reviews, labels, replacement_probs, doc_ids = zip(*data)
         labels_bb = torch.tensor(labels, dtype=torch.long)
         labels_rp = torch.tensor(labels, dtype=torch.long)
         reviews_tokenized = self.collate_reviews(reviews)
@@ -86,7 +98,8 @@ class ReviewCollatorWithReplacementProbs(ReviewCollator):
             labels_bb = labels_bb,
             labels_rp = labels_rp,
             reviews = reviews,
-            replacement_probs = replacement_probs
+            replacement_probs = replacement_probs,
+            doc_ids = doc_ids
         )
 
 @dataclass
@@ -104,14 +117,15 @@ class AnnotatedReviewCollator(ReviewCollator):
 @dataclass
 class AnnotatedReviewCollatorWithReplacementProbs(ReviewCollator):
     def __call__(self, data):
-        reviews, labels, rationale_ranges, replacement_probs = zip(*data)
+        reviews, labels, rationale_ranges, replacement_probs, doc_ids = zip(*data)
         reviews_tokenized = self.collate_reviews(reviews)
         return AnnotatedReviewBatch(
             reviews = reviews,
             reviews_tokenized = reviews_tokenized,
             labels = labels,
             rationale_ranges = rationale_ranges,
-            replacement_probs = replacement_probs
+            replacement_probs = replacement_probs,
+            doc_ids = doc_ids
         )
 
 @dataclass
@@ -157,6 +171,7 @@ class ReviewBatch:
     labels_rp: torch.Tensor
     reviews: Optional[tuple] = None
     replacement_probs: Optional[np.array] = None
+    doc_ids: Optional[tuple] = None
 
 @dataclass
 class AnnotatedReviewBatch:
@@ -165,24 +180,32 @@ class AnnotatedReviewBatch:
     labels: torch.Tensor
     rationale_ranges: tuple
     replacement_probs: Optional[np.array] = None
+    doc_ids: Optional[tuple] = None
 
 @dataclass
 class DataLoaderFactory:
     data_path: str
-    noise_p: int
     batch_size: int
     tokenizer: PreTrainedTokenizerBase
     max_length: int
     shuffle: Optional[bool] = True
+    replacement_probs: str = "tfidf"
+    subset: Optional[int] = None
+    seed: Optional[int] = None
 
     def create_dataloader(self, split, inject_noise):
-        dataset = MovieDatasetFactory(self.data_path, split, self.noise_p).create_dataset(inject_noise)
+        dataset = MovieDatasetFactory(self.data_path, split, self.replacement_probs, self.subset).create_dataset(inject_noise)
         collate_fn = CollatorFactory(self.tokenizer, self.max_length).create_collator(split, inject_noise)
+        # Seeded shuffling, so that a seed fixes the order of training batches
+        generator = None
+        if self.shuffle and self.seed is not None:
+            generator = torch.Generator().manual_seed(self.seed)
 
         return DataLoader(
             dataset = dataset,
             batch_size = self.batch_size,
             collate_fn = collate_fn,
             shuffle = self.shuffle,
+            generator = generator,
             num_workers = 1
         )

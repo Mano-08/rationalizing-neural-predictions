@@ -57,7 +57,7 @@ class WordStatisticsGenerator:
         return token_doc_counts
 
     def get_idf(self):
-        return {token: math.log(len(self.documents) / count) for token, count in self.get_token_doc_counts.items()}
+        return {token: math.log(len(self.documents) / count) for token, count in self.get_token_doc_counts().items()}
 
     def get_doc_atf(self):
         doc_atf = defaultdict(int)

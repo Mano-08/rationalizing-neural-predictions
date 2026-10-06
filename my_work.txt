@@ -1,0 +1,696 @@
+Rationalizing Neural Predictions with Adaptive
+
+Noise Injection
+
+Mano W1
+, Maddili Gnana Pramod1
+
+, and Hima Bindu Kommanti1
+Department of Computer Science and Engineering,
+National Institute of Technology, Andhra Pradesh, India
+{421215, 421210}@student.nitandhra.ac.in, himabinduk@nitandhra.ac.in
+
+Abstract. Neural models yield high accuracy for their predictions but
+lack adequate reasoning. Rationalization is a method that aims to make
+
+neural models inherently interpretable. It first selects a short and mean-
+ingful part of the input text, called a rationale, and then uses it to make
+
+the final prediction. This architecture aims to mimic human-style rea-
+soning by justifying predictions with textual evidence. However, in unsu-
+pervised settings, models tend to exploit spurious correlations to achieve
+
+high accuracy and generate rationales that often lack faithfulness and
+plausibility. To overcome this limitation, noise-based training strategies
+have been introduced that selectively replace non-critical tokens with
+random words from the vocabulary with a probability determined by
+the noise parameter, forcing the model to identify genuinely meaningful
+
+input segments. Building on this, we introduce Adaptive Noise Injec-
+tion (ANI), which injects noise aggressively at the start of training and
+
+gradually reduces, encouraging the model to explore diverse explanations
+and avoid early reliance on superficial cues. The approach improves the
+faithfulness and human-likeness of rationales while maintaining strong
+
+predictive performance, advancing the development of inherently inter-
+pretable NLP systems.
+
+Keywords: Explainable AI · Natural Language Predictions · Interpretable
+Models.
+1 Introduction
+With advancements in pretrained large language models, the transparency and
+complexity of the models have increased drastically. Interpreting the neural
+
+model decision solely based on attention weights yields an implausible expla-
+nation. Rationalization aims to improve the transparency of neural models by
+
+first generating a concise and sufficient subset of the input text, called ratio-
+nales, and, second, making predictions with the rationales generated in place of
+
+the original text, as proposed in Lei et al. [1]. However, the unsupervised nature
+of rationale generation often leads the model to generate implausible, unfaithful,
+and incomprehensible rationales. Online Noise Injection, introduced in Storek
+et al. [2], aims to address this by perturbing the generated rationale. It seeks to
+
+2 Mano et al.
+replace the least important tokens with random tokens from the vocabulary. The
+probability of replacement of tokens is calculated using TF*IDF1
+
+scores, and the
+probability of picking a random word from the vocabulary is calculated using
+ATF*IDF2
+
+scores. But due to the dynamic training loop, where the generator
+and predictor are optimized jointly, the generator may exploit shortcut cues or
+attend to irrelevant tokens that correlate with the prediction label, leading to
+overfitting or spurious rationales.
+In this work, we introduce Adaptive Noise Injection (ANI) to adapt the
+noise injection strategy to the dynamic nature of neural model’s training. ANI
+dynamically injects noise during different stages of training. During the initial
+stage of training, the probability of replacing a non-relevant token with a random
+token based on ATF-IDF is high. This prevents the model from catching spurious
+patterns early on during training and helps in exploring diverse explanations.
+As the training proceeds further, the noise injection probability decays and the
+model converges towards generating plausible and comprehensive rationales.
+2 Related Work
+
+Research in the field of Explainable Artificial Intelligence (XAI) can be catego-
+rized into two methods: post hoc and ante hoc. The post hoc method achieves
+
+explainability after the model is trained. Ante hoc methods are designed to incor-
+porate interpretability into the model during training. The generator-predictor
+
+paradigm is an ante hoc method, introduced in Lei et al. [1].
+
+Rationalizing Neural Predictions: Lei et al. [1] proposed an unsupervised frame-
+work built on two main components: an encoder and a generator. These two
+
+models work together to extract meaningful rationale while ensuring that the
+original prediction remains accurate. Figure 1 illustrates the general architecture
+
+of the Generator-Predictor paradigm, as presented in Yu et al. [3]. The gener-
+ator, denoted as gen(x), identifies a subset of input tokens, called rationale, so
+
+that the encoder’s output on rationale, enc(gen(x)), is close to the output on
+the full input enc(x). The encoder, represented as enc(x), transforms an input
+
+sequence x = {x1, . . . , xl} into a target output vector y ∈ [0, 1]m. This transfor-
+mation is commonly performed using a recurrent neural network (RNN). The
+
+joint loss function in Equation 1 Lei et al. [1], balances predictive accuracy
+with interpretability by incorporating both sparsity and continuity constraints
+on the selected rationale tokens, LCE is the standard cross-entropy loss, ∥z∥1
+encourages sparsity by penalizing the number of tokens selected, Pd−1
+i=1 |zi−zi+1|
+
+penalizes too many transitions between selected and unselected tokens, promot-
+ing contiguous rationales, λ1 and λ2 control the strength of these regularization.
+
+They relied on selecting discrete tokens using Bernoulli random variables, which
+posed a fundamental problem: the non-differentiability of the selection process.
+1 TF*IDF refers to Term-Frequency times Inverse Document Frequency
+2 ATF*IDF refers to Average-Term-Frequency times Inverse Document Frequency
+
+Rationalizing Neural Predictions with Adaptive Noise Injection 3
+To avoid this, a classic gradient estimation method, called REINFORCE, was
+used, as introduced in Williams [4].
+
+Fig. 1. A conventional selective rationalization framework
+
+Ljoint = LCE(gφ( ̃x), y) + λ1 ∥z∥1
+|{z}
+token count
++λ2
+X
+d−1
+i=1
+|zi − zi+1|
+| {z }
+transition penalty
+(1)
+
+Towards Differentiable Rationale Extraction: Although the rationale extraction
+
+approach proposed by Lei et al. [1] marked an important step forward in ex-
+plainable models, it faced notable limitations. The gradient estimation method,
+
+REINFORCE Williams [4], is well known for its high variance in gradient esti-
+mates, often leading to unstable and inefficient optimization. As a result, training
+
+such models became challenging, particularly when aiming for robust and prac-
+tical deployment. To overcome these obstacles, further research proposed a fully
+
+differentiable framework by introducing the HardKuma distribution Bastings
+et al. [5]. The HardKuma distribution serves as a smooth reparameterization
+approximation to the Bernoulli distribution.
+
+A2R: Attention to Rationale Architecture: Building on previous work in ratio-
+nale extraction, the A2R framework introduced in Yu et al. [3] is the first to
+
+incorporate large language models to generate rationales in an end-to-end differ-
+entiable manner. A2R leverages large models’ continuous soft attention outputs
+
+to guide rationale selection, allowing for more stable and effective training. The
+generator module incorporates a non-trainable embedding layer initialized with
+GloVe vectors Pennington et al. [6], followed by a linear layer that assigns scores
+
+to individual tokens. A2R is structured around three core components: a ratio-
+nale generator, a rationale-based predictor, and an attention-based predictor.
+
+The rationale generator produces a soft attention distribution α(X) on input X,
+which simultaneously serves as an attention mechanism and a distribution from
+
+which a binary rationale mask M is sampled, with M ∼ α(X). The rationale-
+based predictor fr(·; θr) then operates on the masked input M ⊙ X, predicting
+
+the output Y , as expressed in Equation 2 Yu et al. [3]. In this context, when
+the generator that minimizes the loss function selects an implausible rationale,
+
+4 Mano et al.
+
+it results in two outcomes: (a) the rationale fails to provide a reasonable con-
+nection to the target label from a human perspective, and (b) it still improves
+
+prediction accuracy at a local level. Such cases might involve relying on punctu-
+ation or making minor modifications to the input Garg and Ramakrishnan [7].
+
+The attention-based predictor, denoted by fa(·; θa), makes predictions based on
+input X weighted by soft attention scores α(X), Equation 3 Yu et al. [3]. In
+practice, the mask M is constructed by retaining the top-q% elements of α(X),
+where q is a predefined sparsity level.
+
+fr(M ⊙ X; θr) (2)
+
+fa(X, α(X); θa) (3)
+
+Unsupervised Selective Rationalization with Noise Injection Storek et al. [2] im-
+proves the A2R architecture by proposing a creative and effective technique
+
+called Online Noise Injection. Although A2R relies on a soft attention-based ra-
+tionale mask and joint training with an attention-based predictor, this newer
+
+approach strengthens the quality of the rationale by explicitly penalizing unin-
+formative token selections. The key idea is to replace tokens that are deemed
+
+less important in the generated rationale with randomly sampled words from
+
+the vocabulary. This discourages the generator from selecting irrelevant or triv-
+ial tokens, such as stop words, since doing so would introduce noise and hinder
+
+the predictor’s performance. As a result, the model learns to identify rationales
+that are not only compact and interpretable but also genuinely influential for
+
+prediction. Yu et al. [3] explores how selective rationalization models can be-
+come trapped in suboptimal solutions during training, whereas Atanasova et al.
+
+[8] introduce a training approach guided by diagnostic feedback to enhance the
+
+plausibility of model explanations. To effectively exploit the noise injection mech-
+anism, the original low-capacity generator with BERT Devlin et al. [9] has been
+
+substituted, enabling the use of a less complex, attention-driven predictor com-
+pared to A2R.
+
+Despite its advantages in promoting plausibility and faithfulness, the use of
+noise injection in this framework introduces a key limitation: the reliance on a
+fixed noise probability p throughout the training. This static configuration fails
+to adapt to the evolving capabilities of the model during training. In the early
+stages, when the rationale generator is still learning to identify relevant tokens, a
+high level of noise may excessively disrupt the learning signal, making it difficult
+for the model to converge. In contrast, when the generator has improved during
+the later stages of training, a fixed noise level may no longer provide sufficient
+regularization to encourage further refinement of the rationales. Thus, the lack
+of a dynamic or adaptive mechanism to control the intensity of noise injection
+can lead to suboptimal learning dynamics, hindering the model’s ability to fully
+exploit the benefits of noise-based regularization.
+
+Rationalizing Neural Predictions with Adaptive Noise Injection 5
+
+3 Methodology
+
+Fig. 2. Architecture of Unsupervised Selective Rationalization with Noise Injection,
+Storek et al. [2] introduced the idea of Online Noise Injection to perturb the rationales
+generated, but relied on an optimal noise value p. We replace the static noise input
+with a dynamic noise injection mechanism that varies at different stages of training.
+Inspired by previous work on selective rationalization and attention-guided
+rationale generation of Storek et al. [2] and Yu et al. [3], respectively, we propose
+
+Adaptive Noise Injection (ANI) to dynamically inject noise into rationale gener-
+ated at different stages of training. The central hypothesis is that if a rationale
+
+remains predictive even after controlled corruption, then it must encode infor-
+mation aligned with human interpretability rather than latent, model-specific
+
+artifacts.
+Unlike fixed noise strategies, which apply a constant perturbation level, ANI
+integrates a progressively decreasing noise schedule analogous to curriculum
+learning. In the early stages of training, higher levels of injected noise prevent the
+generator–predictor system from prematurely converging on brittle token–label
+correlations. This design choice is motivated by observations from Jacovi and
+Goldberg [10] and similar degeneracy findings in explainable NLP systems, where
+the generator may initially latch onto narrow or overly specific lexical cues that
+appear predictive, yet lack semantic grounding. By applying substantial noise
+
+early in training, ANI enforces exploration of a wider space of potential ratio-
+nales, encouraging the model to learn stable, generalizable explanatory struc-
+tures rather than memorized token-level associations.
+
+As training progresses, the noise level gradually decays towards an optimized
+
+lower threshold. This controlled reduction allows the model to consolidate learn-
+ing around meaningful patterns once its representational space has matured. In
+
+later epochs, low-noise conditions ensure that the predictor fine-tunes its reliance
+on coherent, information-bearing rationale tokens rather than being forced to
+compensate for artificially disrupted input. This progressive adjustment mirrors
+annealing strategies commonly used in reinforcement learning and variational
+
+6 Mano et al.
+inference, where exploration dominates early learning, and exploitation becomes
+
+beneficial once the model has acquired a sufficiently structured latent represen-
+tation.
+
+Through this dynamic modulation, ANI strikes a balance between prevent-
+ing the fomation of degenerate rationale early in training and supporting the
+
+convergence toward faithful explanatory behavior in later stages. As a result,
+the final learned rationales not only contribute to an accurate prediction but
+also exhibit improved alignment with human-interpretable evidence, achieving
+stronger justification quality without sacrificing predictive performance.
+3.1 Model Architecture
+
+The proposed architecture consists of three jointly trained components: a gener-
+ator, a rational-based predictor, and an attention-based predictor. Initially, the
+
+generator takes an input sequence X1:T and produces a binary mask M1:T ∈ M.
+This mask determines which tokens in the sequence are included (1) or excluded
+
+(0) from the rationale. Applying this mask to the input sequence yields the ratio-
+nale sequence, denoted as R1:T = X1:T ⊙M1:T , where ⊙ represents element-wise
+
+multiplication, effectively filtering the input down to the selected rationale to-
+kens. In the next stage, the predictor processes the masked sequence R1:T and
+
+produces a prediction Y . The combined objective of both models is to minimize
+the predictive loss based on the generated mask. The Attention based Predictor
+is a linear layer that takes in the BERT embeddings to predict the output label
+denoted as Y
+a
+.
+M1:T ← gen(X1:T ; θgen), M1:T ∈ M (4)
+min
+θgen,θpre
+L
+pre(X1:T ⊙ M1:T ; θpre), Y ̃
+
+(5)
+When both models have sufficient representational capacity and the generator
+is globally optimal, the system maximizes the Maximum Mutual Information
+(MMI) between the chosen rationale and the target label Yu et al. [3]:
+
+max
+M1:T ∈M
+I(X1:T ⊙ M1:T ; Y ̃ ) (6)
+
+However, maximizing MMI does not inherently ensure that the rationale gen-
+erated is meaningful or plausible. Pre-existing biases in either the generator or
+
+predictor, such as those inherited during pre-training, can lead to rational degen-
+eration, as experimented with in Jacovi and Goldberg [10]. If both models are
+
+sufficiently expressive, they may exploit shortcuts by constructing implicit com-
+munication schemes. The fundamental challenge is that a strong generator does
+
+not face an explicit penalty for producing implausible rationales. To address this
+issue, the generated rationales undergo Adaptive Noise Injection. In this stage,
+
+the rationale R1:T is perturbed by probabilistic token replacement. For each to-
+ken wi
+
+in a document d ∈ D, the replacement probability is determined using
+
+Rationalizing Neural Predictions with Adaptive Noise Injection 7
+a normalized TF–IDF score Equation 7). To protect label-indicative terms from
+being replaced, the candidate vocabulary V is filtered through an inverse ATF–
+IDF weighting scheme. Formally, the replacement probability for each candidate
+
+word is computed according to equation 8, where ATF–IDF(wi) denotes the Av-
+erage Term Frequency–Inverse Document Frequency of wi
+
+, and w
+∗
+max represents
+the maximum ATF–IDF value within the document. This mechanism effectively
+discourages the selection of high-salience words during noise injection, ensuring
+that perturbations primarily affect less informative tokens.
+This results in the modified rationale sequence R∗
+1:T
+
+. Importantly, the re-
+placement is designed to primarily affect words that contribute little semantic
+
+value, thus leaving key explanatory tokens intact.
+Finally, the predictor takes the perturbed rationale R∗
+1:T
+
+as input and pro-
+duces the final prediction Y .
+
+wmax − TF*IDF(wi)
+P
+w∈d
+(wmax − TF*IDF(w)) · p · |d| (7)
+w
+∗
+max − ATF*IDF(wi)
+P
+w∈d
+(w∗
+max − ATF*IDF(w)) (8)
+Noise Scheduling with Exponential Decay Training starts with a high
+replacement probability p0 and exponentially decays to the optimal value pfinal
+as training progresses. This encourages exploration and robustness during the
+initial training phase, enabling more precise learning in later epochs. The noise
+schedule in the training step t is given by Equation 9, where γ is a decay rate
+hyperparameter that controls how rapidly the noise level decreases.
+
+pt = pfinal + (p0 − pfinal) · exp(−γt) (9)
+Noise Scheduling with Cosine Decay The cosine decay schedule in the
+
+training progress s ∈ [0, 1] is defined in Equation 10, where s denotes the nor-
+malized training progress, s =
+
+t
+T
+for the training step t of the total steps T,
+where p0 and pfinal are the initial and final noise probabilities, respectively. The
+cosine function ensures that the noise level starts high, gradually decreases in the
+middle phase, and then stabilizes toward the end of the training. This schedule
+encourages steady exploration while avoiding abrupt changes in noise levels.
+
+ps = pfinal + (p0 − pfinal) ·
+
+1 + cos(πs)
+2
+
+(10)
+
+4 Loss Calculations
+To ensure consistency between these predictors and further regularize training,
+a joint objective function has been employed that includes cross-entropy losses
+
+8 Mano et al.
+and a divergence term as formulated in Yu et al. [3] in Equation 11.
+L = LCE(Ya, Y ̃ ) + LCE(Yr, Y ̃ ) + λ · JSD(Ya, Yr) (11)
+
+where λ is a regularization hyperparameter, and JSD denotes the Jensen-
+Shannon divergence between the output distributions of the two predictors. This
+
+encourages the rationale-based predictor to mimic the attention-based predictor,
+promoting coherence between them.
+5 Evaluation Metrics
+
+The rationales generated by the model are evaluated using a variety of met-
+rics designed to assess both faithfulness and plausibility. Faithfulness measures
+
+how well the rationale genuinely explains the model’s decision, while plausibility
+captures how closely the generated rationale aligns with human expectations.
+5.1 Faithfulness
+
+Following DeYoung et al. [11], faithfulness is assessed using two metrics: com-
+prehensiveness and sufficiency. A rationale is said to be comprehensive when it
+
+captures all the relevant information from the input text necessary for making an
+accurate prediction. However, it is considered sufficient if it includes just enough
+of the relevant details to still enable a correct prediction.
+The comprehensiveness score evaluates how much the model’s prediction
+
+changes when the rationale is removed from the input text; higher scores in-
+dicate better comprehensiveness. Meanwhile, the sufficiency score measures how
+
+much the model’s prediction changes when it only has access to the selected
+rationale, rather than the full input; lower scores reflect better sufficiency.
+5.2 Plausibility
+The plausibility of rationale is assessed by comparing the degree of overlap
+of rationales generated by the model and those annotated by humans. The
+intersection-over-union F1 score, the F1 score, the recall, and the precision are
+utilized to assess the plausibility. The setup proposed in Paranjape et al. [12]
+and DeYoung et al. [11] makes use of a partial match threshold of 0.1 to account
+for near matches between model-generated and human-annotated rationales.
+6 Datasets
+
+Previously, research on unsupervised selective rationalization was conducted us-
+ing a de-correlated subset of the BeerAdvocate review data set McAuley et al.
+
+[13], which had been preprocessed by Lei et al. [1]. However, at the request of
+BeerAdvocate, the data set was recently removed, making it inaccessible to the
+
+Rationalizing Neural Predictions with Adaptive Noise Injection 9
+
+research community. The BeerAdvocate data set consisted of 80,000 labeled re-
+views without rationales for training and validation, along with approximately
+
+1,000 labeled reviews containing token-level annotated rationales for testing. In
+contrast, other available data sets provide rational labels for all samples DeYoung
+et al. [11] or do not offer rational labels at all Maas et al. [14]. Moreover, large
+datasets such as MultiRC or FEVER typically offer sentence-level rationales,
+whereas BeerAdvocate had provided token-level annotations.
+To bridge this gap, Storek et al. [2] repurposed existing movie review datasets
+
+to create a task comparable to beer review tasks, allowing new research on un-
+supervised selective rationalization to be benchmarked against models originally
+
+developed for BeerAdvocate data. Specifically, the smaller ERASER Movie Re-
+view dataset (DeYoung et al. [11], Zaidan and Eisner [15], Pang and Lee [16]),
+
+which includes complete token-level rationale annotations, was combined with
+
+the Large Movie Review Dataset Maas et al. [14], which lacks such annota-
+tions. The ERASER data set had been compiled from the IMDb archive of the
+
+rec.arts.movies.reviews newsgroup Pang and Lee [16], while the Large Movie
+Review Data set had been scraped from the IMDb website Maas et al. [14]. No
+overlaps between the two datasets were found. For training, 40,000 reviews from
+
+the Large Movie Review Dataset were used, 10,000 reviews set aside for valida-
+tion, and 2,000 annotated examples from the ERASER Movie Review dataset
+
+used for testing.
+7 Experimental Setup
+All experimental procedures were performed on a cloud workstation configured
+with a 4-core CPU, 30 GB of RAM, and a GPU that offers 32 GB of VRAM.
+Depending on the data set, the training duration of the proposed model varied,
+with USR Movie Reviews requiring more than 7 hours. A fixed value of λ = 0.1
+
+was assigned to the A2R closeness parameter. Optimization was carried out us-
+ing the Adam algorithm, Kingma and Ba [17], with the hyperparameter set to a
+
+learning rate of 2e-5 and a batch size of 16. Dataset-specific noise levels were ap-
+plied, with injection probabilities set at 0.2 for USR selected based on validation
+
+performance during tuning. Model training was completed over a maximum of
+5 epochs for the USR datasets. The checkpoint corresponding to the minimum
+validation loss was preserved.
+8 Results
+With Adaptive Noise Injection (ANI), the model was able to mitigate learning
+spurious patterns early on during training. Setting a higher noise value at the
+
+beginning enabled the model to explore a broader range of possibilities and re-
+assign its weights as rationales were perturbed with random words from the
+
+vocabulary during online noise injection. The results of the experiments are
+presented in Table 1.
+
+10 Mano et al.
+In the USR Movie Review dataset, BERT+ANI (Ours) model achieved an
+accuracy of 90.25%, showing an increase of 2.9 percentage points over BERT+NI
+(87.35%). For plausibility, the F1 score improved significantly from 0.1806 to
+0.3400, indicating a +87.9% relative improvement. Both precision and recall also
+saw large gains, with precision increasing from 0.1233 to 0.2322 and recall from
+0.3372 to 0.6350. On the faithfulness front, the comprehensiveness score (Com)
+improved from 0.0098 to 0.0709, while sufficiency (Suf) became less negative,
+improving from -0.0734 to -0.0280, suggesting a better explanatory alignment
+between rationales and model predictions.
+
+Dataset Model Accuracy % P R F1 Com ↑ Suf ↓
+USR BERT+NI 87.35 0.1233 0.3372 0.1806 0.0098 -0.0734
+BERT+ANI (Ours) 90.25 0.2322 0.6350 0.3400 0.0709 -0.0280
+Table 1. Comparison of BERT-based models on USR Movie Review dataset with
+metrics for plausibility and faithfulness. ANI stands for Adaptive Noise Injection, and
+NI stands for Noise Injection.
+
+Fig. 3. Training loss of Attention Based
+Predictor
+
+Fig. 4. Training loss of Rationale-Based
+Predictor
+
+Comparing the loss versus epochs for training and validation of the Attention-
+Based Prediction task, it can be observed that the addition of Adaptive Noise
+
+injection helped the model reduce its loss. The pattern shows that the model
+is exploring and re-learning, and re-assigning weights heavily during the initial
+
+few epochs, and slowly converging to the optimal value. The model is hence pre-
+vented from catching spurious patterns earlier on during the training, resulting
+
+in faithful and plausible rationales generated at the same time, improving the
+model accuracy.
+
+Rationalizing Neural Predictions with Adaptive Noise Injection 11
+
+9 Conclusion
+By introducing Adaptive Noise Injection, the model was discouraged from relying
+
+on superficial correlations instead, it allowed for exploring a richer set of expla-
+nations that are more causally linked to the final prediction. This significantly
+
+improved the model’s faithfulness and plausibility.
+
+The current noise injection strategy relies on Term Frequency - Inverse Doc-
+ument Frequency to determine which words to replace. Although this helps dis-
+courage the model from overfitting frequent but uninformative tokens, it can also
+
+inadvertently mask contextually important words despite having low TF*IDF
+scores. Future work could explore task-specific or context-based strategies to
+determine replacement probabilities, allowing the model to preserve meaningful
+information during training.
+
+Bibliography
+
+[1] Tao Lei, Regina Barzilay, and Tommi Jaakkola. Rationalizing neural pre-
+dictions, 2016. URL https://arxiv.org/abs/1606.04155.
+
+[2] Adam Storek, Melanie Subbiah, and Kathleen McKeown. Unsupervised
+selective rationalization with noise injection. In Anna Rogers, Jordan
+
+Boyd-Graber, and Naoaki Okazaki, editors, Proceedings of the 61st An-
+nual Meeting of the Association for Computational Linguistics (Volume 1:
+
+Long Papers), pages 12647–12659, Toronto, Canada, July 2023. Association
+for Computational Linguistics. https://doi.org/10.18653/v1/2023.
+acl-long.707. URL https://aclanthology.org/2023.acl-long.707/.
+
+[3] Mo Yu, Yang Zhang, Shiyu Chang, and Tommi S. Jaakkola. Understand-
+ing interlocking dynamics of cooperative rationalization. In Proceedings of
+
+the 35th International Conference on Neural Information Processing Sys-
+tems, NIPS ’21, Red Hook, NY, USA, 2021. Curran Associates Inc. ISBN
+
+9781713845393.
+[4] Ronald J. Williams. Simple statistical gradient-following algorithms for
+connectionist reinforcement learning. Machine Learning, 8(3):229–256,
+1992. https://doi.org/10.1007/BF00992696. URL https://doi.org/
+10.1007/BF00992696.
+
+[5] Jasmijn Bastings, Wilker Aziz, and Ivan Titov. Interpretable neural pre-
+dictions with differentiable binary variables. In Anna Korhonen, David
+
+Traum, and Lluís Màrquez, editors, Proceedings of the 57th Annual Meet-
+ing of the Association for Computational Linguistics, pages 2963–2977, Flo-
+rence, Italy, July 2019. Association for Computational Linguistics. https:
+
+//doi.org/10.18653/v1/P19-1284. URL https://aclanthology.org/
+P19-1284/.
+[6] Jeffrey Pennington, Richard Socher, and Christopher Manning. GloVe:
+Global vectors for word representation. In Alessandro Moschitti, Bo Pang,
+and Walter Daelemans, editors, Proceedings of the 2014 Conference on
+Empirical Methods in Natural Language Processing (EMNLP), pages
+1532–1543, Doha, Qatar, October 2014. Association for Computational
+Linguistics. https://doi.org/10.3115/v1/D14-1162. URL https://
+aclanthology.org/D14-1162/.
+
+[7] Siddhant Garg and Goutham Ramakrishnan. BAE: BERT-based adver-
+sarial examples for text classification. In Bonnie Webber, Trevor Cohn,
+
+Yulan He, and Yang Liu, editors, Proceedings of the 2020 Conference
+on Empirical Methods in Natural Language Processing (EMNLP), pages
+
+6174–6181, Online, November 2020. Association for Computational Lin-
+guistics. https://doi.org/10.18653/v1/2020.emnlp-main.498. URL
+
+https://aclanthology.org/2020.emnlp-main.498/.
+[8] Pepa Atanasova, Jakob Grue Simonsen, Christina Lioma, and Isabelle
+Augenstein. Diagnostics-guided explanation generation. Proceedings of
+the AAAI Conference on Artificial Intelligence, 36(10):10445–10453, Jun.
+
+Rationalizing Neural Predictions with Adaptive Noise Injection 13
+2022. https://doi.org/10.1609/aaai.v36i10.21287. URL https://
+ojs.aaai.org/index.php/AAAI/article/view/21287.
+[9] Jacob Devlin, Ming-Wei Chang, Kenton Lee, and Kristina Toutanova.
+
+BERT: Pre-training of deep bidirectional transformers for language under-
+standing. In Jill Burstein, Christy Doran, and Thamar Solorio, editors, Pro-
+ceedings of the 2019 Conference of the North American Chapter of the Asso-
+ciation for Computational Linguistics: Human Language Technologies, Vol-
+ume 1 (Long and Short Papers), pages 4171–4186, Minneapolis, Minnesota,
+
+June 2019. Association for Computational Linguistics. https://doi.org/
+10.18653/v1/N19-1423. URL https://aclanthology.org/N19-1423/.
+[10] Alon Jacovi and Yoav Goldberg. Aligning faithful interpretations with their
+
+social attribution. Transactions of the Association for Computational Lin-
+guistics, 9:294–310, 03 2021. ISSN 2307-387X. https://doi.org/10.1162/
+
+tacl_a_00367. URL https://doi.org/10.1162/tacl_a_00367.
+
+[11] Jay DeYoung, Sarthak Jain, Nazneen Fatema Rajani, Eric Lehman, Caim-
+ing Xiong, Richard Socher, and Byron C. Wallace. ERASER: A bench-
+mark to evaluate rationalized NLP models. In Dan Jurafsky, Joyce
+
+Chai, Natalie Schluter, and Joel Tetreault, editors, Proceedings of the
+58th Annual Meeting of the Association for Computational Linguistics,
+
+pages 4443–4458, Online, July 2020. Association for Computational Linguis-
+tics. https://doi.org/10.18653/v1/2020.acl-main.408. URL https:
+
+//aclanthology.org/2020.acl-main.408/.
+[12] Bhargavi Paranjape, Mandar Joshi, John Thickstun, Hannaneh Hajishirzi,
+
+and Luke Zettlemoyer. An information bottleneck approach for control-
+ling conciseness in rationale extraction. In Bonnie Webber, Trevor Cohn,
+
+Yulan He, and Yang Liu, editors, Proceedings of the 2020 Conference
+on Empirical Methods in Natural Language Processing (EMNLP), pages
+
+1938–1952, Online, November 2020. Association for Computational Lin-
+guistics. https://doi.org/10.18653/v1/2020.emnlp-main.153. URL
+
+https://aclanthology.org/2020.emnlp-main.153/.
+[13] Julian McAuley, Jure Leskovec, and Dan Jurafsky. Learning attitudes and
+
+attributes from multi-aspect reviews. In 2012 IEEE 12th International Con-
+ference on Data Mining, pages 1020–1025, 2012. https://doi.org/10.
+
+1109/ICDM.2012.110.
+[14] Andrew L. Maas, Raymond E. Daly, Peter T. Pham, Dan Huang, Andrew Y.
+
+Ng, and Christopher Potts. Learning word vectors for sentiment analy-
+sis. In Dekang Lin, Yuji Matsumoto, and Rada Mihalcea, editors, Pro-
+ceedings of the 49th Annual Meeting of the Association for Computational
+
+Linguistics: Human Language Technologies, pages 142–150, Portland, Ore-
+gon, USA, June 2011. Association for Computational Linguistics. URL
+
+https://aclanthology.org/P11-1015/.
+
+[15] Omar Zaidan and Jason Eisner. Modeling annotators: A generative ap-
+proach to learning from annotator rationales. In Mirella Lapata and
+
+Hwee Tou Ng, editors, Proceedings of the 2008 Conference on Empirical
+Methods in Natural Language Processing, pages 31–40, Honolulu, Hawaii,
+
+14 Mano et al.
+October 2008. Association for Computational Linguistics. URL https:
+//aclanthology.org/D08-1004/.
+[16] Bo Pang and Lillian Lee. A sentimental education: sentiment analysis using
+subjectivity summarization based on minimum cuts. In Proceedings of the
+42nd Annual Meeting on Association for Computational Linguistics, ACL
+’04, page 271–es, USA, 2004. Association for Computational Linguistics.
+https://doi.org/10.3115/1218955.1218990. URL https://doi.org/
+10.3115/1218955.1218990.
+
+[17] Diederik P Kingma and Jimmy Ba. Adam: A method for stochastic opti-
+mization. arXiv preprint arXiv:1412.6980,
