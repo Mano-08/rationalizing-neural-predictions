@@ -6,7 +6,7 @@ import torch
 
 
 SCHEDULES = ['constant', 'exponential', 'cosine', 'linear', 'closed_loop']
-SIGNALS = ['jsd', 'entropy']
+SIGNALS = ['jsd', 'entropy', 'exposure']
 
 
 def js_div_per_example(P, Q, eps = 1e-12):
@@ -101,6 +101,9 @@ class PIController:
     #            up when the two predictors decouple.
     #   entropy: normalized entropy of the generator's attention. Noise goes
     #            up when the attention collapses onto few tokens.
+    #   exposure: how much the rationale consists of the words noise
+    #            injection targets (1 = as much as a random rationale). Noise
+    #            goes up when the generator selects them.
     signal: str
     target: float
     kp: float

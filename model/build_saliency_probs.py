@@ -28,6 +28,7 @@ def parse_args():
     parser.add_argument('--classifier_path', type = str, default = os.path.join("trained", "full_text"))
     parser.add_argument('--model', type = str, default = 'bert-base-uncased')
     parser.add_argument('--max_length', type = int, default = 512)
+    parser.add_argument('--truncation_side', choices = ['right', 'left'], default = 'right')
     parser.add_argument('--batch_size', type = int, default = 32)
     parser.add_argument('--device', type = str, default = 'cuda')
     # rank: probability falls linearly with the saliency rank of a token
@@ -61,6 +62,7 @@ def get_wordpiece_saliency(model, reviews_tokenized, labels):
 
 def main(args):
     tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast = True)
+    tokenizer.truncation_side = args.truncation_side
     model = FullTextClassifier(num_labels = 2, model = args.model).to(args.device)
     model_load(model, get_checkpoint_path(args.classifier_path))
     model.eval()

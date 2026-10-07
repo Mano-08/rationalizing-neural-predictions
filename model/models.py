@@ -18,10 +18,16 @@ def js_div(P, Q):
 
 
 class BlackBoxPredictor(nn.Module):
-    def __init__(self, num_labels:int, model:str, freeze_encoder:bool):
+    def __init__(self, num_labels:int, model:str, freeze_encoder:bool, num_layers:Optional[int] = None):
         super().__init__()
         self.num_labels = num_labels
         self.encoder = AutoModel.from_pretrained(model)
+        if num_layers is not None:
+            # Keep the lower layers only. Every layer mixes more of the whole
+            # text into each token, until the attention below can sit on any
+            # token (a period, "the") and still see the evidence.
+            self.encoder.encoder.layer = self.encoder.encoder.layer[:num_layers]
+            self.encoder.config.num_hidden_layers = num_layers
         if freeze_encoder:
             for param in self.encoder.parameters():
                 param.requires_grad = False
@@ -34,7 +40,7 @@ class BlackBoxPredictor(nn.Module):
             nn.Linear(self.encoder.config.hidden_size, self.num_labels)
         )
 
-    def forward(self, input_ids, token_type_ids, attention_mask, selectable = None):
+    def forward(self, input_ids, token_type_ids, attention_mask, selectable = None, evidence_noise = None):
         # get contextualized embeddings from a transformer-based encoder
         outputs = self.encoder(
             input_ids = input_ids,
@@ -50,8 +56,23 @@ class BlackBoxPredictor(nn.Module):
             token_logits = token_logits.masked_fill(~selectable, float("-inf"))
         # use softmax to get attention over tokens
         token_att = F.softmax(token_logits, -1).unsqueeze(-1)
+        # Noise injection in the generator's own evidence: the state pooled at
+        # a token is replaced, with the token's replacement probability, by the
+        # state of a random token of the batch. Attending to the words noise
+        # injection targets then yields unreliable evidence, and unlike noise
+        # on the rationale this reaches the generator through its own loss.
+        # evidence_noise holds the probabilities, -1 for tokens that are no words.
+        pooled_states = hidden_states_no_cls
+        if evidence_noise is not None:
+            is_word = evidence_noise >= 0
+            replace = (torch.rand(evidence_noise.shape, device = evidence_noise.device) < evidence_noise) & is_word
+            if replace.any():
+                word_states = hidden_states_no_cls[is_word].detach()
+                random_states = word_states[torch.randint(len(word_states), (int(replace.sum()),), device = word_states.device)]
+                pooled_states = hidden_states_no_cls.clone()
+                pooled_states[replace] = random_states
         # generate context vector
-        ctx_vec = torch.bmm(hidden_states_no_cls.transpose(1, 2), token_att).squeeze(-1)
+        ctx_vec = torch.bmm(pooled_states.transpose(1, 2), token_att).squeeze(-1)
         # return predicted labels, per token probabilities P(z|x)
         return F.softmax(self.predictor(ctx_vec), -1), token_att
 
@@ -72,12 +93,21 @@ class RationalePredictor(nn.Module):
             nn.Linear(self.encoder.config.hidden_size, self.num_labels)
         )
 
-    def forward(self, input_ids, token_type_ids, attention_mask):
-        outputs = self.encoder(
-            input_ids = input_ids,
-            token_type_ids = token_type_ids,
-            attention_mask = attention_mask
-        )
+    def forward(self, input_ids, token_type_ids, attention_mask, gate = None):
+        if gate is None:
+            outputs = self.encoder(
+                input_ids = input_ids,
+                token_type_ids = token_type_ids,
+                attention_mask = attention_mask
+            )
+        else:
+            # scale every token embedding by its gate (see get_gate)
+            embeddings = self.encoder.get_input_embeddings()(input_ids) * gate.unsqueeze(-1)
+            outputs = self.encoder(
+                inputs_embeds = embeddings,
+                token_type_ids = token_type_ids,
+                attention_mask = attention_mask
+            )
         return F.softmax(self.predictor(outputs[1]), -1)
 
     def get_loss(self, att_pred, hard_pred, labels, proximity):
@@ -103,6 +133,17 @@ class FullTextClassifier(nn.Module):
             inputs_embeds = inputs_embeds
         )
         return self.predictor(outputs[1])
+
+
+def get_replacement_probs(batch, device):
+    # replacement probability (at p = 1) of the word of every token after
+    # CLS, -1 for tokens that are no words
+    probs = torch.full(batch.reviews_tokenized.input_ids[:, 1:].shape, -1.0)
+    for i, replacement_probs in enumerate(batch.replacement_probs):
+        word_ids = batch.reviews_tokenized.word_ids(i)[1:]
+        positions = [position for position, word_id in enumerate(word_ids) if word_id is not None]
+        probs[i, positions] = torch.as_tensor(replacement_probs[[word_ids[position] for position in positions]], dtype = torch.float)
+    return probs.to(device)
 
 
 def get_selectable(reviews_tokenized, tokenizer):
@@ -166,6 +207,9 @@ class BaseNoisyRationaleExtractor(RationaleExtractor):
     noise_p: float = 0.0
     # reproduce the released code, see extract_from_mask_with_replacement
     legacy_alignment: bool = False
+    # words of the last batch of rationales and how exposed they are to noise
+    selected_words: Optional[list] = None
+    exposure: float = 1.0
 
     def __post_init__(self):
         self.load_scored_vocab()
@@ -194,6 +238,8 @@ class BaseNoisyRationaleExtractor(RationaleExtractor):
         # Extract rationales and pad
         rationales = []
         replacement_ratio_sum = 0
+        exposure_sum = 0
+        self.selected_words = []
         doc_ids = batch.doc_ids if batch.doc_ids is not None else [None] * len(batch.reviews)
         for i, (review, replacement_probs, mask, doc_id) in enumerate(zip(batch.reviews, batch.replacement_probs, hard_mask, doc_ids)):
             # Masked select. hard_mask has no CLS token, so word ids must not
@@ -220,8 +266,14 @@ class BaseNoisyRationaleExtractor(RationaleExtractor):
             )
             replacement_ratio_sum += replacement_ratio
             rationales.append(rationale)
+            self.selected_words.append(indices)
+            exposure_sum += float(np.mean(replacement_probs[indices]))
 
         average_replacement_ratio = replacement_ratio_sum / len(batch.reviews)
+        # Mean replacement probability of the selected words at p = 1. It is 1
+        # for a random rationale, above 1 if the rationale favors the words
+        # noise injection targets and below 1 if it avoids them.
+        self.exposure = exposure_sum / len(batch.reviews)
 
         tokenized_rationales = self.batch_tokenize(rationales)
         return tokenized_rationales, average_replacement_ratio
@@ -230,6 +282,32 @@ class BaseNoisyRationaleExtractor(RationaleExtractor):
         tokenized_rationales, replacement_ratio = self.extract_from_mask_with_replacement(batch, hard_mask)
         tokenized_remainder = self.extract_from_mask(batch, ~hard_mask)
         return tokenized_rationales, tokenized_remainder, replacement_ratio
+
+    def get_gate(self, batch, token_att, tokenized_rationales, weight):
+        # Straight-through coupling of the generator to the rationale
+        # predictor. Every rationale token gets a gate that equals 1, so the
+        # predictor sees the same input, but whose gradient is that of
+        # weight * log(attention of the word the token stands for). The loss
+        # of the predictor on the (noisy) rationale thereby tells the
+        # generator which of its selected words helped and which hurt.
+        gate = torch.ones(tokenized_rationales.input_ids.shape, dtype = token_att.dtype, device = token_att.device)
+        attention = token_att.squeeze(-1)
+        for i, words in enumerate(self.selected_words):
+            # attention of every word = sum over its wordpieces
+            word_ids = batch.reviews_tokenized.word_ids(i)[1:]
+            positions = [position for position, word_id in enumerate(word_ids) if word_id is not None]
+            word_of_position = torch.tensor([word_ids[position] for position in positions], device = token_att.device)
+            word_attention = torch.zeros(len(batch.reviews[i]), dtype = token_att.dtype, device = token_att.device)
+            word_attention = word_attention.index_add(0, word_of_position, attention[i, positions])
+            log_attention = word_attention.clamp_min(1e-12).log()
+            # rationale token -> rationale word -> word of the document
+            rationale_positions = [(position, words[word_id]) for position, word_id in enumerate(tokenized_rationales.word_ids(i)) if word_id is not None]
+            if len(rationale_positions) == 0:
+                continue
+            token_positions, document_words = zip(*rationale_positions)
+            selected = log_attention[list(document_words)]
+            gate[i, list(token_positions)] = 1 + weight * (selected - selected.detach())
+        return gate
 
 
 @dataclass
@@ -318,6 +396,9 @@ class TopkSelector:
     max_length: int
     pad_token_id: int
     device: str
+    # tokens are ranked by their attention averaged over a window of this
+    # many tokens, which selects phrases instead of scattered tokens
+    window: int = 1
 
     # gets empty mask
     def get_mask(self, token_att):
@@ -338,6 +419,10 @@ class TopkSelector:
     # gets scores to rank tokens by, SEP and PAD tokens always rank last
     def get_scores(self, token_att: torch.Tensor, selectable: Optional[torch.Tensor] = None) -> torch.Tensor:
         scores = token_att.squeeze(-1).detach()
+        if self.window > 1:
+            if selectable is not None:
+                scores = scores.masked_fill(~selectable, 0.0)
+            scores = F.avg_pool1d(scores.unsqueeze(1), kernel_size = self.window, stride = 1, padding = self.window // 2, count_include_pad = False).squeeze(1)
         if selectable is not None:
             scores = scores.masked_fill(~selectable, -1.0)
         return scores
@@ -418,14 +503,18 @@ class SelectorFactory:
     pad_token_id: int
     device: str
     seed: Optional[int] = None
+    window: int = 1
 
     def create_selector(self, selection_method):
+        if self.window % 2 == 0:
+            raise ValueError('The selection window must be an odd number of tokens')
         if selection_method == 'random':
             return RandomSelector(
                 sparsity = self.sparsity,
                 max_length = self.max_length,
                 pad_token_id = self.pad_token_id,
                 device = self.device,
+                window = self.window,
                 seed = self.seed
             )
         if selection_method == 'words':
@@ -433,7 +522,8 @@ class SelectorFactory:
                 sparsity = self.sparsity,
                 max_length = self.max_length,
                 pad_token_id = self.pad_token_id,
-                device = self.device
+                device = self.device,
+                window = self.window
             )
         elif selection_method == 'span':
             return TopkContiguousSpanSelector(

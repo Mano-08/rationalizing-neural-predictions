@@ -26,6 +26,7 @@ def parse_args():
     parser.add_argument('--data_path', type = str, default = os.path.join("..", "..", "rnp_movie_review", "original"))
     parser.add_argument('--model', type = str, default = 'bert-base-uncased')
     parser.add_argument('--max_length', type = int, default = 512)
+    parser.add_argument('--truncation_side', choices = ['right', 'left'], default = 'right')
     parser.add_argument('--batch_size', type = int, default = 32)
     parser.add_argument('--device', type = str, default = 'cuda')
     parser.add_argument('--seed', type = int, default = 0)
@@ -104,6 +105,7 @@ def sample_candidates(logits, original_ids, banned, args, generator):
 
 def main(args):
     tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast = True)
+    tokenizer.truncation_side = args.truncation_side
     if len(tokenizer) >= 2**16 or tokenizer.pad_token_id != 0:
         raise ValueError("Candidates are stored as uint16 with 0 = PAD as the empty slot")
     if args.top_k < args.num_candidates:

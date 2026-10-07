@@ -1,0 +1,1087 @@
+arXiv:2305.17534v1 [cs.CL] 27 May 2023
+Unsupervised Selective Rationalization with Noise Injection
+Adam Storek
+Columbia University
+astorek@cs.columbia.edu
+Melanie Subbiah
+Columbia University
+m.subbiah@columbia.edu
+Kathleen McKeown
+Columbia University
+kathy@cs.columbia.edu
+Abstract
+A major issue with using deep learning models
+in sensitive applications is that they provide no
+explanation for their output. To address this
+problem, unsupervised selective rationalization
+produces rationales alongside predictions by
+chaining two jointly-trained components, a ra-
+tionale generator and a predictor. Although this
+architecture guarantees that the prediction re-
+lies solely on the rationale, it does not ensure
+that the rationale contains a plausible explana-
+tion for the prediction. We introduce a novel
+training technique that effectively limits gen-
+eration of implausible rationales by injecting
+noise between the generator and the predictor.
+Furthermore, we propose a new benchmark for
+evaluating unsupervised selective rationaliza-
+tion models using movie reviews from existing
+datasets. We achieve sizeable improvements
+in rationale plausibility and task accuracy over
+the state-of-the-art across a variety of tasks, in-
+cluding our new benchmark, while maintaining
+or improving model faithfulness.1
+1 Introduction
+With the advent of large pre-trained language mod-
+els like GPT-3 (Brown et al., 2020), the size and
+complexity of deep learning models used for natu-
+ral language processing has dramatically increased.
+Yet greater performance and complexity can come
+at the cost of interpretability, masking anything
+from implementation mistakes to learned bias.
+A model architecture that justifies its output by
+providing relevant subsets of input text as a ratio-
+nale is therefore desirable (see example in Figure
+1). The unsupervised selective rationalization archi-
+tecture as introduced by Lei et al. (2016) generates
+rationales alongside predictions by chaining two
+jointly-trained components, a rationale-generator
+and a predictor. The generator extracts a rationale:
+concatenated short and concise spans of the input
+Movie Review:
+Ultra low budget but extremely inventive horror film
+about a group of friends vacationing in a cabin who
+accidentally awaken an evil force in the woods via the
+necronomicon, the book of the dead. Bruce Campbell
+stars as Ash, who eventually becomes the sole survivor
+and has to battle both the demons from the woods, and
+his friends who have become demons (including his
+own girlfriend). The results shown on screen are
+amazing considering the film's tiny budget, constant
+location changes, and a filming schedule that was
+sporadic over two years…
+Class: Positive
+Figure 1: Example of a rationale selected by BERT-
+A2R + NI (our model) on the USR Movie Review
+dataset (our benchmark), which asks models to clas-
+sify movie reviews as positive or negative.
+1Code and benchmark are available at https://github.
+com/adamstorek/noise_injection.
+text that suffice for prediction. The predictor bases
+its prediction only on this rationale, which encour-
+ages faithfulness, meaning how much the rationale
+reveals what parts of the input were important to
+the model’s prediction. In practice, however, the
+rationale often isn’t plausible, meaning it can’t
+convince a human of the correct prediction, under-
+mining the architecture’s interpretability (Jacovi
+and Goldberg, 2021; Zheng et al., 2022). Using a
+high-capacity generator can further degrade plausi-
+bility (Yu et al., 2019).
+To prevent this effect, we introduce a novel train-
+ing strategy that leverages online noise injection,
+based on word-level unsupervised data augmenta-
+tion (Xie et al., 2020). By definition, if the loss-
+minimizing generator selects an implausible ratio-
+nale, then the rationale both (a) offers no plausible
+connection for a human to the target label and (b)
+locally improves prediction accuracy. This might
+include communicating via punctuation (Yu et al.,
+2019) or subtle input perturbations (Garg and Ra-
+makrishnan, 2020). Our new approach is to inject
+noise into the generated rationale during training by
+probabilistically replacing lower-importance words
+with noise - random words from the vocabulary -
+before passing the rationale to the predictor. We
+observe that this strategy leads to a significant im-
+provement in plausible rationale generation and pre-
+diction accuracy without compromising the faith-
+fulness of the architecture. We also show that pow-
+erful generators typically interfere with plausible
+rationale generation but can be effectively deployed
+when trained with noise injection.
+To test our approach, we introduce a new bench-
+mark for unsupervised selective rationalization by
+integrating existing movie review datasets to re-
+place the retracted canonical beer review dataset
+(McAuley et al., 2012; McAuley and Leskovec,
+2013; Lei et al., 2016).2 We merge a large
+IMDb movie review dataset (Maas et al., 2011)
+for training and validation and a smaller, rationale-
+annotated movie review dataset (DeYoung et al.,
+2020; Zaidan and Eisner, 2008; Pang and Lee,
+2004) for evaluation. We also evaluate our unsu-
+pervised approach on the ERASER Movie Review,
+MultiRC and FEVER tasks (DeYoung et al., 2020;
+Khashabi et al., 2018; Thorne et al., 2018).3
+Our contributions therefore include: 1) character-
+izing the issue of implausible rationale generation
+from the perspective of powerful rationale gener-
+ators, 2) introducing a novel training strategy that
+limits implausible rationale generation and enables
+unsupervised selective rationalization models with
+powerful generators, 3) proposing a new unsuper-
+vised rationalization benchmark by repurposing
+existing movie review datasets, and 4) achieving
+more plausible rationale generation, with up to a
+relative 21% improvement in F1 score and a 7.7
+point improvement in IOU-F1 score against the
+baseline model across a number of tasks.
+2 Related Work
+A major challenge with selective rationalization is
+that discrete selection of rationale tokens is non-
+differentiable, making training challenging without
+additional rationale supervision. Lei et al. (2016)
+use REINFORCE-style learning (Williams, 1992)
+to propagate the training signal from the predictor
+to the generator. Bastings et al. (2019) propose
+a differentiable approach leveraging the Hard Ku-
+maraswamy Distribution. Yu et al. (2019) strive to
+improve rationale comprehensiveness. Chang et al.
+(2020) focus on avoiding spuriously correlated ra-
+2The dataset has been retracted at the request of BeerAd-
+vocate and is no longer in use.
+3Licensing information can be found in Appendix A.
+tionales. Yu et al. (2021) tackle the propensity of
+selective rationalization models to get stuck in local
+minima. Atanasova et al. (2022) use diagnostics-
+guided training to improve plausibility.
+Our work builds on the previous approaches,
+since we also frame the generator-predictor in-
+teraction as a cooperative game and seek to im-
+prove plausibility. The previous approaches have,
+however, introduced additional training objectives
+(Atanasova et al., 2022) or involved incorporating
+a third adversarial (Yu et al., 2019) or cooperative
+(Yu et al., 2021) component. This increases model
+complexity significantly, leading to more resource-
+intensive and/or complicated training. Instead, we
+demonstrate the effectiveness of online noise injec-
+tion, a considerably more lightweight approach.
+An alternative approach is proposed by DeYoung
+et al. (2020) who assemble a series of datasets with
+labeled rationales; this enables fully supervised ra-
+tionale learning. Given rationale-annotated training
+sets, Jain et al. (2020) train each model component
+separately, approaching the accuracy of an entirely
+black-box model. Although this is a compelling di-
+rection, requiring supervision reduces the practical
+usability of this technique, as many applications
+lack rationale annotations.
+Both unsupervised and supervised selective ratio-
+nalization approaches generally require a specific
+token selection strategy to select the output ratio-
+nale from the generator model (Yu et al., 2021; Jain
+et al., 2020; Paranjape et al., 2020). No previous
+work that we are aware of, however, has tried to
+then modify the output rationale before it is input
+into the predictor. Using online noise injection
+to enforce prediction stability is therefore a novel
+approach that adds greater power to the current
+architectures and can be easily retrofitted.
+3 Implausible Rationale Generation
+Previous work has conceptualized the interaction
+between the generator and the predictor as a coop-
+erative game (Chen et al., 2018a,b; Chang et al.,
+2019; Yu et al., 2019; Chang et al., 2020; Yu et al.,
+2021). This repeated sequential game consists of
+two-round stage games. In the first round, the gen-
+erator accepts an input sequence X1:T and outputs
+a rationale selection as a binary mask M1:T ∈M
+where Mrepresents the set of all masks such that
+X1:T ⊙M1:T satisfies rationale constraints. In the
+second round, the predictor accepts an input se-
+quence X1:T⊙M1:T and outputs prediction Y. The
+joint objective is to minimize the loss (see Equation
+2) based on the generated mask (see Equation 1):
+M1:T ←gen(X1:T; θgen),M1:T ∈M (1)
+min
+θgen,θpre
+L(pre(X1:T ⊙M1:T; θpre),
+˜
+Y) (2)
+For classification, it is customary to minimize the
+cross-entropy loss LCE. Such a system can be
+shown to maximize mutual information (MMI) of
+the rationale with respect to the class label provided
+sufficient generator and predictor capacity as well
+as a globally optimal generator (Yu et al., 2021;
+Chen et al., 2018a):
+max
+I(X1:T ⊙M1:T;
+M1:T ∈M
+˜
+Y) (3)
+However, this property does not guarantee rationale
+plausibility.
+First, MMI does not protect against spurious
+correlations (Chang et al., 2020). For example,
+a pleasant taste is not a good explanation for a
+positive review of a beer’s appearance, although
+the two aspects are strongly correlated.
+Second, MMI does not prevent rationale degener-
+ation if the generator and predictor already contain
+certain biases, for example from pre-training (Ja-
+covi and Goldberg, 2021).
+Third, MMI does not prevent rationale degenera-
+tion if the generator and predictor are sufficiently
+powerful to develop a common encoding. Yu et al.
+(2019) found that providing the generator with a
+label predicted by a full-input classifier led the gen-
+erator to develop a communication scheme with
+the predictor, including a period for positive and
+a comma for negative examples. Jacovi and Gold-
+berg (2021) argue that any generator with sufficient
+capacity to construct a good inner-representation
+of Y can cause rationale degeneration.
+The key underlying cause is that a sufficiently
+powerful generator is not disincentivized to pro-
+duce implausible rationales beyond the assumption
+that generating a plausible rationale should max-
+imize the expected accuracy of the predictor in
+the current training iteration. However, since the
+predictor is treated as a black box, this is not guar-
+anteed. On the i-th training iteration, the generator
+greedily selects a binary mask M1:T that minimizes
+the expected loss:
+arg min
+E [L(prei(X1:T ⊙M1:T))] (4)
+M1:T ∈M
+where preG,i represents the generator’s learned rep-
+resentation of pre(·; θpre) from its previous expe-
+rience interacting with the predictor for i−1 it-
+erations in game G. As iincreases, the generator
+learns to leverage deficiencies and biases of the
+predictor that remain hidden to humans, resulting
+in rationale plausibility degeneration.
+4 Online Noise Injection
+We propose a strategy that disrupts the generator’s
+learned representation of the predictor preG,i for
+all games G∈G, thereby making it harder for the
+generator to learn to exploit quirks of the predictor.
+We use online noise injection, which probabilis-
+tically perturbs unimportant words in a rationale
+sequence X of length T (see Algorithm 1).
+Algorithm 1: Noise Injection.
+Input: input text X1:T; binary mask M1:T
+Data: set of documents D; vocabulary V
+R1:T ←X1:T ⊙M1:T;
+R∗
+1:T ←R1:T;
+forall ri ∈R1:T do
+pi = ProbOfReplacementD(ri);
+replace←Binomial(1,pi);
+if replacethen
+r∗
+i ←SampleFromVocabD;V();
+end
+end
+return perturbed rationale R∗
+1:T
+If the generator attempts to generate an implau-
+sible rationale during training iteration i, it strate-
+gically includes unimportant words from the input
+text in the generated rationale, relying on the pre-
+dictor to pick up on the bias. By subtly perturbing
+the rationale - replacing the unimportant words -
+noise injection disrupts this attempt, and the pre-
+dictor does not respond to the generator-injected
+bias favorably as expected by the generator. The
+generator is therefore forced to unlearn/reset its
+representation preG,i of the predictor and reassess
+its strategy, learning that generating implausible ra-
+tionales is ineffective. Across any two stages i,jof
+game G, noise injection therefore keeps the learned
+representations of the predictor more consistent:
+∀G∈G,∀i,j ∈stages(G), preG,i(·) ≈preG,j(·)
+(5)
+We implement the ProbOfReplacement and Sam-
+pleFromVocab functions by adapting a strategy
+that probabilistically replaces words with small
+TF*IDF, originally proposed for unsupervised data
+augmentation by Xie et al. (2020). We precom-
+pute the probability of replacement of each word
+wi ∈din each document d∈Das its normalized
+TF*IDF score multiplied by the document length
+and a hyperparameter representing the magnitude
+of augmentation p:
+wmax−TF*IDF(wi)
+w∈dwmax−TF*IDF(w) p|d| (6)
+wmax = max
+w∈d
+TF*IDF(w) (7)
+We use these precomputed probabilities to sam-
+ple which words to replace as shown in Algorithm
+1. The words are replaced with random words from
+the vocabulary V. Nonetheless, we also strive to
+prevent sampling "keywords" from the vocabulary
+- words that are highly indicative of a label - to
+avoid confusing the predictor. We compute the sam-
+pling probability of wi as its normalized ATF*IDF,
+where ATF corresponds to term frequency macro-
+averaged over D:
+w∗
+max−ATF*IDF(wi)
+w∈dw∗
+max−ATF*IDF(w) (8)
+w∗
+max = max
+w∈d
+ATF*IDF(w) (9)
+5 Model
+Our baseline model builds on the A2R architecture
+by Yu et al. (2021) who improve training stability
+by using an auxiliary predictor connected directly
+to the generator via an attention layer - this allows
+for gradients to flow. A2R selects top-k
+2 bigrams
+with the highest attention scores from the generator
+as the rationale and input for the second predictor,
+with k corresponding to the number of rationale
+tokens selected as a fraction of the size of the input
+text. The two components minimize their separate
+criteria as well as the Jensen-Shannon divergence
+of their predictions Ya and Yr for the attention-
+based predictor and the rationale-based predictor,
+respectively. A2R’s generator consists of a fixed
+GloVe (Pennington et al., 2014) embedding layer
+and a linear token scoring layer.
+To take full advantage of our noise injection strat-
+egy, we replace the limited-capacity generator with
+BERT (Devlin et al., 2019). This allows us to use
+a simpler attention-based predictor than A2R (see
+Figure 2). To further manifest the efficacy of noise
+injection, we opt for a top-kunigram selection strat-
+egy which offers less regularization compared to
+a bigram selection strategy. Selecting unigrams is
+more challenging because it allows the model to
+select uninformative stopwords like "a" or "the".
+Our architecture is shown in Figure 2. Both the
+selection strategy and the noise injection are model-
+external and untrained. As in Yu et al. (2021), the
+attention-based (see Equation 10) and the rationale-
+based (see Equation 11) components are trained
+using identical objectives - minimizing the sum
+of the cross-entropy loss and the Jensen-Shannon
+divergence of the two predictors:
+La = LCE(Ya
+,
+˜
+Y) + λJSD(Ya,Yr) (10)
+Lr = LCE(Yr
+,
+˜
+Y) + λJSD(Ya,Yr) (11)
+We refer to our model as BERT-A2R and add +NI
+when noise injection is used during training.
+6 USR Movie Review Dataset
+Previous work on unsupervised selective rational-
+ization used a decorrelated subset of the BeerAd-
+vocate review dataset (McAuley et al., 2012) as
+preprocessed by Lei et al. (2016). The dataset has
+recently been removed at the request of BeerAd-
+vocate and is therefore inaccessible to the scien-
+tific community. BeerAdvocate reviews consists of
+80,000 labeled reviews without rationales for train-
+ing/validation and∼1,000 labeled reviews with
+token-level annotated rationales for testing. Alter-
+native datasets either include rationale labels for
+the entire dataset (DeYoung et al., 2020) or do
+not provide rationale labels altogether (e.g. Maas
+et al. (2011)). Moreover, large datasets such as
+MultiRC or FEVER tend to provide sentence-level
+rationales compared to BeerAdvocate token-level
+rationales. We thus repurpose existing movie re-
+view datasets to recreate a task similar to beer re-
+view, enabling new work on unsupervised selec-
+tive rationalization to evaluate their performance
+against models designed for beer review. We merge
+a smaller ERASER Movie Review dataset (DeY-
+oung et al., 2020; Zaidan and Eisner, 2008; Pang
+and Lee, 2004) that has full token-level rationale
+annotations with the lower-cased Large Movie Re-
+view Dataset (Maas et al., 2011) which has no ra-
+tionale annotations.
+The movie review task is similar to the binarized
+beer review task as used in Chang et al. (2019); Yu
+et al. (2019); Chang et al. (2020); Yu et al. (2021);
+𝑋!:#
+BERT
+Forward
+Forward, training-only
+Backward
+Generator Attention-based
+Predictor
+𝐸!:#
+BERT Embeddings
+Token-scoring
+linear layer
+𝛼!:#
+Attention Weight
+⊙
+Classifier
+(linear layer)
+Top-k unigram
+selection
+Rationale-based Predictor
+𝑀!:#
+Rationale Mask
+𝑋!:#
+⊙
+Noise Injection
+Perturbed
+Rationale
+𝑅!:$
+BERT
+Classifier
+(linear layer)
+𝑌%
+ℒ'(
+ℒ)*
+𝑌&
+ℒ'(
+Figure 2: BERT-A2R + NI architecture. We replaced the generator’s fixed GloVe (Pennington et al., 2014)
+embedding layer used in A2R with BERT-base. The original A2R uses a fixed GloVe embedding layer, GRU (Cho
+et al., 2014), and a linear classifier pipeline for each predictor. For the attention-based predictor, we remove the
+GloVe-GRU pipeline and instead reuse the generator’s BERT embeddings. For the rationale-based predictor, we
+replace the GloVe-GRU pipeline with another BERT-base. Both A2R and BERT-A2R feed the masked input text
+directly into the predictor. To add noise injection during training, we first feed the masked input text into the noise
+injection component. This component is disabled during evaluation.
+IMDb Movie Review 1:
+Jim Carrey shines in this beautiful movie. This is now
+one of my favorite movies. I read all about the
+making and I thought it was incredible how they did
+it. I can't wait till this comes out on dvd. I saw this in
+theaters so many times, I can't even count how times
+I've seen it. Class: Positive
+ERASER Movie Review 1:
+“Party Camp," is one of the most mindnumbingly
+brainless comedies I've seen in awhile. A late rip-off
+of the “Meatballs" series, the film follows a group of
+young camp counselors at camp chipmunk. That's
+really about all that can be said about the "plot"
+because nothing much happens, except that the main
+character, wise-cracking Jerry (Andrew Ross), has the
+hots for a cute blonde (Kerry Brennan ), and there is a
+big contest in the climax. How fun! Class: Negative
+ERASER Movie Review 2:
+Absolute Power, the new film produced and directed
+by Clint Eastwood, attempts to be a thriller set in the
+world of hypocritical presidents and their murderous
+political staff. It is about as thrilling as a lecture on
+the mating habits of the South American
+grasshopper. One can only wonder how an utterly
+absurd script like the one written by William
+Goldman could have ever interested Eastwood. Not
+only is the plot unbelievable and contrived, but
+even the writing itself lacks any consistency or
+intelligence. Class: Negative
+Figure 3: Examples from the USR Movie Review
+Dataset. Note that compared to ERASER reviews,
+IMDb reviews tend to be shorter; ERASER reviews
+vary in length dramatically. Furthermore, ERASER ra-
+tionale annotations are often inconsistent: the rationale
+for review 1 contains only very short spans, whereas the
+rationale for review 2 spans a few sentences.
+both are binary sentiment classification tasks based
+on English user reviews. However, human ratio-
+nale annotations of Eraser Movie Review are less
+coherent and consistent than beer review (see Fig-
+ure 3) and lack single-aspect labels comparable to
+beer review’s appearance, aroma, and taste labels.
+Moreover, movie review annotations tend to be
+over-complete (Yu et al., 2021): the same relevant
+information is often repeated many times in each
+review. This new task therefore also evaluates pre-
+vious models’ robustness to a subtle distribution
+shift, an increasingly important consideration for
+real-world systems.
+The reviews from the ERASER Dataset were col-
+lected and processed by Pang and Lee (2004) from
+the IMDb archive of the rec.arts.movies.reviews
+newsgroup, whereas the Large Movie Review
+Dataset was scraped from the IMDb website by
+Maas et al. (2011). In order to avoid overlap be-
+tween the train and test sets, we looked for sim-
+ilarity by searching for matches between lower-
+cased, break-tag-free, stop-word-free, lemmatized
+sentences which spanned at least 5 tokens to avoid
+generic matches such as "would not recommend" or
+"great film !". We discovered no overlap between
+the datasets. We use 40,000 reviews from the Large
+Movie Review Dataset for training and the remain-
+ing 10,000 reviews for validation. We then test
+our model on the 2,000 annotated examples from
+ERASER Movie Review.
+7 Experimental setup
+Metrics We evaluate generated rationales across
+several datasets using different metrics that capture
+faithfulness and plausibility. Faithfulness captures
+the extent to which the generated rationales truly
+explain the model’s output. For faithfulness, we use
+comprehensiveness and sufficiency metrics (DeY-
+oung et al., 2020). A rationale is comprehensive if
+it extracts all the information contained in the input
+text that is relevant for prediction and sufficient if
+it contains enough relevant information to make
+an accurate prediction. The comprehensiveness
+score measures the difference between the model’s
+predictions on the entire input text and the input
+text without the selected rationale (higher is better),
+whereas the sufficiency score measures the differ-
+ence between the model’s predictions on the entire
+input text and just on the rationale (lower is better).
+For plausibility, we use standard alignment met-
+rics in reference to the human-annotated rationales:
+precision, recall, and F1 score as well as IOU-F1
+score (referred to as IOU in tables) with partial
+match threshold 0.1 (DeYoung et al., 2020; Paran-
+jape et al., 2020). We use token-level metrics for
+Movie Review which offers token-level annota-
+tions and sentence-level metrics for MultiRC and
+FEVER which provide only sentence-level annota-
+tions. Finally, we report prediction accuracy for the
+overall classification task. All results are averaged
+across 5 random seeds and reported as the mean
+with standard deviation in parentheses.
+Implementation Our BERT-A2R models are
+trained for a maximum of 20 epochs for ERASER
+Movies and 5 epochs for every other dataset, keep-
+ing the checkpoint with the lowest validation loss.
+All BERT-A2R variants use uncased BERT-base,
+A2R closeness parameter λ = 0.1, and the selec-
+tion strategy of picking the top k = 20% of the
+highest attention-scoring tokens for movie review
+or sentences for MultiRC and FEVER. We compute
+sentence-level scores by taking sentence-level av-
+erages of token scores. For optimization, we used
+Adam (Kingma, D.P. et al., 2015) with learning
+rate 2e-5 and batch size 16. Noise injection level p
+was set to 0.2 for USR and ERASER Movie review,
+0.3 for MultiRC, and 0.05 for FEVER. This was
+determined based on our hyperparameter search.
+All of the models were trained on a single machine
+equipped with a 12-core processor, 64 GB of RAM,
+and a GPU with 24 GB of VRAM. 4
+4Training details can be found in Appendix B.
+8 Results
+8.1 Does noise injection improve selective
+rationalization?
+Model Acc. F1
+Hard-Kuma (2019)- BERT Sparse IB (2020) A2R (2021)- BERT-A2R (Ours) 84.0 84.0 (2.9) 27.0
+27.5
+34.9
+36.4 (2.8)
+BERT-A2R + NI (Ours) 85.7 (2.7) 38.6 (0.6)
+Table 1: Results on ERASER Movie Review (with-
+out rationale supervision). +NI indicates using noise
+injection. We only report Accuracy and F1 to match
+published results on this benchmark and dashes indicate
+where the original paper did not publish this metric.
+To compare against previous published results,
+we trained a BERT-A2R model on the ERASER
+Movie Review dataset with and without noise in-
+jection and compared our numbers to published
+results from the best unsupervised selective ratio-
+nalization systems on this benchmark (see Table 1).
+All models were trained without rationale supervi-
+sion. We see that our model with noise injection
+improves on both the classification task accuracy
+and the rationale F1 score relative to previous sys-
+tems. Note that noise injection improves the F1
+score more than the introduction of BERT to A2R.
+We then train BERT-A2R models with and with-
+out noise injection on the MultiRC and FEVER
+benchmarks (see Table 2) as well as on our
+new USR Movie Review benchmark (see Table
+3). Again, our noise injection training strategy
+achieves statistically significant improvements in
+rationale alignment with human annotations (p<
+0.01 on the MultiRC and USR Movies, p<0.05
+on the FEVER, and p<0.1 on ERASER Movies),
+achieving up to a relative 21% improvement in F1
+score over our already performant baseline. The
+plausibility improvement applies for both token-
+level and sentence-level extraction tasks and across
+all metrics. Prediction accuracy also improves
+across all tasks except FEVER. Noise injection also
+does not seem to have a negative impact on model
+faithfulness. On ERASER benchmarks, neither
+comprehensiveness nor sufficiency worsen dramat-
+ically, and in the case that one score worsens, the
+other score tends to remain stable or even improve.
+On USR movie review, we see an improvement in
+both faithfulness scores from using noise injection.
+Task Plausibility Faithfulness
+Dataset Model Acc. P R F1 IOU Com ↑ Suf ↓
+MultiRC BA2R 66.1 (1.9) 18.5 (1.6) 21.9 (2.2) 19.3 (1.8) n/a -.01 (.01) -.02 (.02)
+BA2R+NI 66.4 (0.8) 22.6 (1.2) 26.9 (1.8) 23.8 (1.4) n/a -.01 (.01) -.02 (.02)
+FEVER BA2R BA2R+NI 82.1 (3.2) 78.2 (1.9) 36.3 (0.6) 39.0 (2.5) 44.0 (0.3) 47.2 (2.9) 36.7 (0.5) 39.5 (2.5) n/a n/a .02 (.01) .02 (.00) -.01 (.02)
+.00 (.00)
+Movies BA2R BA2R+NI 84.0 (2.9) 85.7 (2.7) 36.3 (2.8) 38.5 (0.6) 36.5 (2.8) 38.7 (0.6) 36.4 (2.8) 38.6 (0.6) 30.9 (3.9) 34.4 (2.2) .02 (.02) .05 (.02) -.04 (.02)
+-.02 (.01)
+Table 2: Results on ERASER benchmark datasets. P, R, and F1 are sentence-level for MultiRC and FEVER, since
+they use sentence-level rationale annotations, and token-level for Movie Review, as it uses token-level annotations.
+IOU is only sensible to use for token-level rationale annotations.
+8.2 How does the noise injection level p affect
+model performance?
+0.40
+USR Movie Review
+ERASER Movie Review
+FEVER
+MultiRC
+rationale F1 ~ rationale plausibility
+0.35
+0.30
+0.25
+0.20
+0.0 0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9
+p ~ noise injection level
+Figure 4: BERT-A2R + NI rationale F1 on the test set
+with varying noise injection level p. Error bands show
+±1 standard error. Long-dash lines indicate the no noise
+injection baselines (p= 0) for each dataset.
+We train variants of BERT-A2R+NI with dif-
+ferent levels of p to examine what noise level is
+optimal for different datasets (see Figure 4). We
+average results across 5 seeds but there is still some
+noise given that the methodology injects noise into
+the process. It appears that in all cases noise in-
+jection seems to degrade performance once pbe-
+comes too high as we would expect since too much
+noise prevents useful signal from getting through.
+The optimal pvaries depending on the task. Ra-
+tionale alignment performance on FEVER peaks
+at just p= 0.05. The optimum for ERASER and
+USR Movie Review is at p= 0.1 and p= 0.2, re-
+spectively. The best performance on MultiRC was
+achieved at p = 0.3. There are numerous factors
+that might interact with noise injection to cause
+this behavior: task-specific demands, sentence vs.
+token-level rationale annotations, and the suitabil-
+ity of other training parameters. These interactions
+might be complex, especially with training strate-
+gies that dynamically adjust pduring training. We
+leave exploration of these factors for future work.
+8.3 Does noise injection enable the use of
+powerful high-capacity rationale
+generators?
+For this experiment, we train BERT-A2R with fixed
+or trainable BERT weights in the generator, with
+or without noise injection, and evaluate on our new
+USR Movie Review benchmark (see Table 3). The
+version with fixed BERT weights in the generator
+has much less trainable capacity and cannot learn a
+task-specific text representation, whereas the gen-
+erator with trainable BERT weights can potentially
+learn much better rationales or degrade to implau-
+sible rationales.
+We find that the tuned generator trained with
+noise injection achieves superior performance
+across all the rationalization metrics without com-
+promising prediction accuracy (2.8 improvement
+in rationale F1 score and a 7.7 improvement in ra-
+tionale IOU-F1 score relative to the fixed setting).
+In contrast, the tuned generator without noise in-
+jection training performed the worst in all rationale
+metrics as well as prediction accuracy. Noise in-
+jection with a fixed generator results in a minor
+improvement in both plausibility metrics and pre-
+diction accuracy. We can therefore observe not
+only that noise injection allows us to leverage the
+power of a tunable BERT model in the generator
+that previously would have resulted in performance
+degradation, but also that the benefits of noise in-
+jection are greater with a powerful high-capacity
+generator model.
+Finally, the addition of noise injection training
+also slightly improves comprehensiveness for both
+fixed and tuned generators while improving suffi-
+Task Plausibility Faithfulness
+Model Acc. P R F1 IOU Com ↑ Suf ↓
+fixed gen. weights fixed gen. weights + NI tuned gen. weights tuned gen. weights + NI 85.0 (0.8) 85.8 (1.1) 82.4 (8.6) 87.9 (1.8) 21.9 (0.4) 22.3 (0.4) 20.2 (2.2) 24.4 (0.6) 47.4 (0.8) 48.2 (0.9) 43.7 (4.7) 52.7 (1.3) 30.0 (0.5) 30.5 (0.6) 27.6 (3.0) 33.3 (0.8) 29.9 (0.6) 30.7 (0.8) 29.1 (5.3) 38.4 (1.9) .02 (.00) .03 (.01) .03 (.02) .04 (.01) Table 3: Results on USR Movie Review using fixed or trainable BERT weights in the BERT-A2R generator.
+-.02 (.00)
+-.01 (.00)
+-.03 (.03)
+-.04 (.02)
+ciency for the tuned generator.
+Human-annotated:
+With the exception of Don Knotts as the annoying "tv
+repairman" the film is cast perfectly:
+BERT-A2R:
+With the exception of Don Knotts as the annoying "tv
+repairman" the film is cast perfectly:
+BERT-A2R + NI:
+With the exception of Don Knotts as the annoying "tv
+repairman" the film is cast perfectly:
+Class: Positive
+For our qualitative analysis we randomly se-
+lected 20 reviews to evaluate the effect of adding
+noise injection to BERT-A2R during training.
+From this review sample, we include examples that
+we believe are characteristic for the behavior we
+observed. First, a BERT-A2R trained with noise
+injection tends to select longer spans of text as
+rationales (see Figure 6, 7), generally without sacri-
+ficing precision compared to the baseline. Selecting
+continuous rationales greatly improves readability
+and human-alignment as noted by Lei et al. (2016).
+Figure 5: An occasional failure case of noise injection
+training - omitting frequently used words in movie re-
+views, such as "film".
+8.4 What errors do the models make?
+Human-annotated:
+Proof of Life, Russell Crowe's one-two punch of a deft
+kidnap and rescue thriller, is one of those rare gems. A
+taut drama laced with strong and subtle acting, an
+intelligent script, and masterful directing, together it
+delivers something virtually unheard of in the film
+industry these days, genuine motivation in a story that
+rings true.
+BERT-A2R:
+Proof of Life, Russell Crowe's one-two punch of a deft
+kidnap and rescue thriller, is one of those rare gems. A
+taut drama laced with strong and subtle acting, an
+intelligent script, and masterful directing, together it
+delivers something virtually unheard of in the film
+industry these days, genuine motivation in a story that
+rings true.
+BERT-A2R + NI:
+Proof of Life, Russell Crowe's one-two punch of a deft
+kidnap and rescue thriller, is one of those rare gems. A
+taut drama laced with strong and subtle acting, an
+intelligent script, and masterful directing, together it
+delivers something virtually unheard of in the film
+industry these days, genuine motivation in a story that
+rings true.
+Class: Positive
+Human-annotated:
+The movie's running time is under two hours, but it
+seems like it is well over it. There's just not enough
+humor to speed things along, and not enough
+meaning to propel any drama.
+BERT-A2R:
+The movie's running time is under two hours, but it
+seems like it is well over it. There's just not enough
+humor to speed things along, and not enough meaning
+to propel any drama.
+BERT-A2R + NI:
+The movie's running time is under two hours, but it
+seems like it is well over it. There's just not enough
+humor to speed things along, and not enough
+meaning to propel any drama.
+Class: Negative
+Figure 7: BERT-A2R + NI produces a more continuous
+and readable rationale, but it also includes a not-so-
+relevant part of the previous sentence.
+Figure 6: This review shows the benefits of BERT-A2R
++ NI’s propensity to highlight longer rationale spans
+where the baseline selects only single words.
+We also observed that BERT-A2R + NI occa-
+sionally fails to select generic words such as "film"
+that, nevertheless, form a part of the rationale (see
+Figure 5). This could be a downside to our noise
+injection strategy, since the model will learn to ig-
+nore words with low TF*IDF even though they are
+relevant in a minority of cases. A potential remedy
+might be to use task-specific heuristics to generate
+probability of replacement information instead of
+the general low TF*IDF strategy. We leave this for
+future work.
+Conclusion
+In this paper, we investigate a major obstacle of
+unsupervised selective rationalization frameworks,
+where the generator has a tendency to learn to gen-
+erate implausible rationales: rationales that lack a
+convincing explanation of the correct prediction.
+We explain the generator’s propensity towards de-
+generation in terms of a flawed incentive structure,
+characterizing unsupervised selective rationaliza-
+tion as a sequential, repeated cooperative game.
+Through this lens, we propose a novel training strat-
+egy that penalizes implausible rationale generation,
+thereby realigning the incentive structure with the
+objective to generate plausible rationales. Using a
+new benchmark for unsupervised selective rational-
+ization, we show that our noise injection approach
+is beneficial for training high-capacity generators,
+outperforming the current state of the art models.
+Limitations
+One of the main limitations of the noise injection
+training strategy is that statistics used to determine
+probability of replacement and sampling probabil-
+ity are token-specific. Although this works well
+on languages with limited morphology such as En-
+glish, inflected languages like Czech that rely on
+declension and conjugation might require a lemma-
+based strategy or a different technique altogether.
+Furthermore, the model extracts a rationale of fixed
+length k, proportional to the length of the input text.
+Nevertheless, input text might include more or less
+information relevant to the class label; a sparsity
+objective as proposed by Paranjape et al. (2020)
+could remedy this issue. Lastly, injecting noise dur-
+ing training sometimes leads to more unpredictable
+training runs.
+Additional model limitations are connected to
+using BERT. Despite its performance and fast train-
+ing, using BERT limits the scalability to long
+text due to the 512-token limitation; nevertheless,
+tasks involving long text might be able to lever-
+age specialized approaches such as Beltagy et al.
+(2020). Likewise, BERT renders BERT-A2R about
+20 times larger than the GRU-based A2R, requiring
+greater GPU resources.
+The dataset also comes with a few limitations.
+As Yu et al. (2021) note, some reviews contain
+many clear explanations for the target label, de-
+creasing the need for the generator to include all
+relevant explanations in the rationale. Similarly,
+the sparsity of human-annotated rationales can be
+inconsistent across reviews: as shown in Figure 3,
+some rationales include long, generous spans of
+text that contain irrelevant information, whereas
+other rationales consist of merely the most impor-
+tant phrases.
+Ethics Statement
+We believe that improving the effectiveness and
+efficiency of unsupervised selective rationalization
+in the context of large pre-trained models such
+as BERT (Devlin et al., 2019) can help uncover
+and mitigate their learned bias as well as any im-
+plementation mistakes. Enabling models to pro-
+duce plausible faithful rationales increases trans-
+parency, improving the end-user’s understanding
+of the model’s prediction and allowing AI practi-
+tioners to make more informed ethical choices in
+deploying models.
+Acknowledgments
+This research was conducted with funding from
+the Defense Advanced Research Projects Agency
+(DARPA) under Contract No. HR001120C0123.
+The views, opinions, and findings expressed are
+those of the authors and do not represent the offi-
+cial views or policies of the U.S. Department of
+Defense or the U.S. Government.
+References
+Pepa Atanasova, Jakob Grue Simonsen, Christina Li-
+oma, and Isabelle Augenstein. 2022. Diagnostics-
+guided explanation generation. Proceedings of
+the AAAI Conference on Artificial Intelligence,
+36(10):10445–10453.
+Jasmijn Bastings, Wilker Aziz, and Ivan Titov. 2019.
+Interpretable Neural Predictions with Differentiable
+Binary Variables. In Proceedings of the 57th An-
+nual Meeting of the Association for Computational
+Linguistics, pages 2963–2977, Florence, Italy. Asso-
+ciation for Computational Linguistics.
+Iz Beltagy, Matthew E. Peters, and Arman Cohan.
+2020. Longformer: The Long-Document Trans-
+former. ArXiv:2004.05150 [cs].
+Tom Brown, Benjamin Mann, Nick Ryder, Melanie
+Subbiah, Jared D Kaplan, Prafulla Dhariwal, Arvind
+Neelakantan, Pranav Shyam, Girish Sastry, Amanda
+Askell, Sandhini Agarwal, Ariel Herbert-Voss,
+Gretchen Krueger, Tom Henighan, Rewon Child,
+Aditya Ramesh, Daniel Ziegler, Jeffrey Wu, Clemens
+Winter, Chris Hesse, Mark Chen, Eric Sigler, Ma-
+teusz Litwin, Scott Gray, Benjamin Chess, Jack
+Clark, Christopher Berner, Sam McCandlish, Alec
+Radford, Ilya Sutskever, and Dario Amodei. 2020.
+Language models are few-shot learners. In Ad-
+vances in Neural Information Processing Systems,
+volume 33, pages 1877–1901. Curran Associates,
+Inc.
+Shiyu Chang, Yang Zhang, Mo Yu, and Tommi Jaakkola.
+2019. A game theoretic approach to class-wise se-
+lective rationalization. In Advances in Neural In-
+formation Processing Systems, volume 32. Curran
+Associates, Inc.
+Shiyu Chang, Yang Zhang, Mo Yu, and Tommi Jaakkola.
+2020. Invariant Rationalization. In Proceedings of
+the 37th International Conference on Machine Learn-
+ing, pages 1448–1458. PMLR.
+Jianbo Chen, Le Song, Martin Wainwright, and Michael
+Jordan. 2018a. Learning to explain: An information-
+theoretic perspective on model interpretation. In Pro-
+ceedings of the 35th International Conference on
+Machine Learning, volume 80 of Proceedings of Ma-
+chine Learning Research, pages 883–892. PMLR.
+Jianbo Chen, Le Song, Martin J. Wainwright, and
+Michael I. Jordan. 2018b. L-shapley and c-shapley:
+Efficient model interpretation for structured data.
+Kyunghyun Cho, Bart van Merriënboer, Dzmitry Bah-
+danau, and Yoshua Bengio. 2014. On the properties
+of neural machine translation: Encoder–decoder ap-
+proaches. In Proceedings of SSST-8, Eighth Work-
+shop on Syntax, Semantics and Structure in Statistical
+Translation, pages 103–111, Doha, Qatar. Associa-
+tion for Computational Linguistics.
+Jacob Devlin, Ming-Wei Chang, Kenton Lee, and
+Kristina Toutanova. 2019. BERT: Pre-training of
+Deep Bidirectional Transformers for Language Un-
+derstanding. In Proceedings of the 2019 Conference
+of the North American Chapter of the Association for
+Computational Linguistics: Human Language Tech-
+nologies, Volume 1 (Long and Short Papers), pages
+4171–4186, Minneapolis, Minnesota. Association for
+Computational Linguistics.
+Jay DeYoung, Sarthak Jain, Nazneen Fatema Rajani,
+Eric Lehman, Caiming Xiong, Richard Socher, and
+Byron C. Wallace. 2020. ERASER: A Benchmark to
+Evaluate Rationalized NLP Models. In Proceedings
+of the 58th Annual Meeting of the Association for
+Computational Linguistics, pages 4443–4458, Online.
+Association for Computational Linguistics.
+Siddhant Garg and Goutham Ramakrishnan. 2020.
+BAE: BERT-based adversarial examples for text clas-
+sification. In Proceedings of the 2020 Conference on
+Empirical Methods in Natural Language Processing
+(EMNLP), pages 6174–6181, Online. Association for
+Computational Linguistics.
+Alon Jacovi and Yoav Goldberg. 2021. Aligning faithful
+interpretations with their social attribution. Transac-
+tions of the Association for Computational Linguis-
+tics, 9:294–310.
+Sarthak Jain, Sarah Wiegreffe, Yuval Pinter, and By-
+ron C. Wallace. 2020. Learning to Faithfully Ratio-
+nalize by Construction. In Proceedings of the 58th
+Annual Meeting of the Association for Computational
+Linguistics, pages 4459–4473, Online. Association
+for Computational Linguistics.
+Daniel Khashabi, Snigdha Chaturvedi, Michael Roth,
+Shyam Upadhyay, and Dan Roth. 2018. Looking
+beyond the surface: A challenge set for reading com-
+prehension over multiple sentences. In Proceedings
+of the 2018 Conference of the North American Chap-
+ter of the Association for Computational Linguistics:
+Human Language Technologies, Volume 1 (Long Pa-
+pers), pages 252–262, New Orleans, Louisiana. As-
+sociation for Computational Linguistics.
+Kingma, D.P., Ba, L.J., and Amsterdam Machine Learn-
+ing lab (IVI, FNWI). 2015. Adam: A Method for
+Stochastic Optimization. In International Confer-
+ence on Learning Representations (ICLR). arXiv.org.
+Tao Lei, Regina Barzilay, and Tommi Jaakkola. 2016.
+Rationalizing Neural Predictions. In Proceedings of
+the 2016 Conference on Empirical Methods in Nat-
+ural Language Processing, pages 107–117, Austin,
+Texas. Association for Computational Linguistics.
+Andrew L. Maas, Raymond E. Daly, Peter T. Pham,
+Dan Huang, Andrew Y. Ng, and Christopher Potts.
+2011. Learning word vectors for sentiment analysis.
+In Proceedings of the 49th Annual Meeting of the
+Association for Computational Linguistics: Human
+Language Technologies, pages 142–150, Portland,
+Oregon, USA. Association for Computational Lin-
+guistics.
+Julian McAuley, Jure Leskovec, and Dan Jurafsky. 2012.
+Learning Attitudes and Attributes from Multi-aspect
+Reviews. In 2012 IEEE 12th International Confer-
+ence on Data Mining, pages 1020–1025. ISSN: 2374-
+8486.
+Julian John McAuley and Jure Leskovec. 2013. From
+amateurs to connoisseurs: modeling the evolution of
+user expertise through online reviews. In Proceed-
+ings of the 22nd international conference on World
+Wide Web - WWW ’13, pages 897–908, Rio de Janeiro,
+Brazil. ACM Press.
+Bo Pang and Lillian Lee. 2004. A sentimental educa-
+tion: Sentiment analysis using subjectivity summa-
+rization based on minimum cuts. In Proceedings
+of the 42nd Annual Meeting of the Association for
+Computational Linguistics (ACL-04), pages 271–278,
+Barcelona, Spain.
+Bhargavi Paranjape, Mandar Joshi, John Thickstun,
+Hannaneh Hajishirzi, and Luke Zettlemoyer. 2020.
+An information bottleneck approach for controlling
+conciseness in rationale extraction. In Proceedings
+of the 2020 Conference on Empirical Methods in
+Natural Language Processing (EMNLP), pages 1938–
+1952, Online. Association for Computational Linguis-
+tics.
+Jeffrey Pennington, Richard Socher, and Christopher
+Manning. 2014. GloVe: Global vectors for word
+representation. In Proceedings of the 2014 Confer-
+ence on Empirical Methods in Natural Language Pro-
+cessing (EMNLP), pages 1532–1543, Doha, Qatar.
+Association for Computational Linguistics.
+James Thorne, Andreas Vlachos, Christos
+Christodoulopoulos, and Arpit Mittal. 2018.
+FEVER: a large-scale dataset for fact extraction
+and VERification. In Proceedings of the 2018
+Conference of the North American Chapter of
+the Association for Computational Linguistics:
+Human Language Technologies, Volume 1 (Long
+Papers), pages 809–819, New Orleans, Louisiana.
+Association for Computational Linguistics.
+Ronald J. Williams. 1992. Simple statistical gradient-
+following algorithms for connectionist reinforcement
+learning. Mach. Learn., 8(3–4):229–256.
+Qizhe Xie, Zihang Dai, Eduard Hovy, Thang Luong, and
+Quoc V. Le. 2020. +unsupervised data augmentation
+for consistency training. In NeuRIPS.
+Mo Yu, Shiyu Chang, Yang Zhang, and Tommi Jaakkola.
+2019. Rethinking cooperative rationalization: In-
+trospective extraction and complement control. In
+Proceedings of the 2019 Conference on Empirical
+Methods in Natural Language Processing and the
+9th International Joint Conference on Natural Lan-
+guage Processing (EMNLP-IJCNLP), pages 4094–
+4103, Hong Kong, China. Association for Computa-
+tional Linguistics.
+Mo Yu, Yang Zhang, Shiyu Chang, and Tommi S.
+Jaakkola. 2021. Understanding Interlocking Dynam-
+ics of Cooperative Rationalization. Advances in Neu-
+ral Information Processing Systems, 34.
+Omar Zaidan and Jason Eisner. 2008. Modeling an-
+notators: A generative approach to learning from
+annotator rationales. In Proceedings of the 2008
+Conference on Empirical Methods in Natural Lan-
+guage Processing, pages 31–40, Honolulu, Hawaii.
+Association for Computational Linguistics.
+Yiming Zheng, Serena Booth, Julie Shah, and Yilun
+Zhou. 2022. The irrationality of neural rationale mod-
+els. In Proceedings of the 2nd Workshop on Trustwor-
+thy Natural Language Processing (TrustNLP 2022),
+pages 64–73, Seattle, U.S.A. Association for Compu-
+tational Linguistics.
+Appendix
+A Licensing
+Model License
+A2R MIT License
+HF BERT-base-uncased Apache 2.0
+NLTK "popular" Table 4: Apache 2.0
+Listing of model licenses.
+Dataset License
+FEVER Apache License 2.0
+MultiRC Apache License 2.0
+Movies Apache License 2.0
+IMDb Movies None, to our knowledge
+USR Movies MIT License
+Table 5: Listing of dataset licenses.
+B Training Details
+Total estimated GPU hours spent on training: 500.
+BERT-A2R has 109484547 parameters.
+Dataset Train Val Test
+FEVER 97957 6122 6111
+MultiRC 24029 3214 4848
+Movies 1600 200 200
+USR Movies 40000 10000 2000
+Table 6: Dataset details: Number of examples.
+Dataset Train Test
+FEVER 150 min 150 s
+MultiRC 70 min 90 s
+Movies 17 min 15 s
+USR Movies 110 min 70 s
+Table 7: Dataset details: BERT-A2R runtime.
+Dataset LR BS #E P
+FEVER 2e-5 16 5 2
+MultiRC 2e-5 16 5 n/a
+Movies 2e-5 16 20 5
+USR Movies 2e-5 16 (64) 5 (10) 2 (n/a)
+Table 8: BERT-A2R Training parameters by dataset.
+LR, BS, #E and P stand for learning rate, batch size,
+number of epochs, and patience. Parameters in paren-
+theses are for fixed BERT generator training.

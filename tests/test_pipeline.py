@@ -121,6 +121,41 @@ def test_noise_schedules(monkeypatch, work_path, model_path, name, argv, check):
     assert 0 <= results["accuracy"] <= 1
 
 
+@pytest.mark.parametrize("name,argv", [
+    # frozen generator, noise in its evidence, level held by the exposure controller, phrases, end of long texts
+    ("frozen_evidence_closed", ["--freeze_encoder_bb", "--inject_noise", "--noise_target", "evidence", "--noise_schedule", "closed_loop",
+        "--ctrl_signal", "exposure", "--ctrl_target", 0.9, "--noise_p", 0.2, "--noise_p_min", 0.0, "--selection_window", 5, "--truncation_side", "left"]),
+    # shallow generator coupled to the rationale predictor, noise in both places
+    ("coupled_both", ["--inject_noise", "--noise_target", "both", "--noise_p", 0.2, "--coupling_weight", 0.5, "--generator_layers", 1]),
+])
+def test_generator_options(monkeypatch, work_path, model_path, name, argv):
+    save_path, results, metrics = train_and_evaluate(monkeypatch, work_path, model_path, name, *argv, "--save_attention")
+    assert all(0.0 <= entry["noise"]["p_mean"] <= 0.5 for entry in metrics)
+    assert all(0.2 < entry["noise"]["exposure"] < 2.0 for entry in metrics)
+    assert 0 <= results["accuracy"] <= 1
+    attention = np.load(os.path.join(save_path, "attention.npz"))
+    assert attention["lengths"].sum() == len(attention["attention"]) == len(attention["gold"]) == len(attention["word_ids"])
+    assert len(attention["lengths"]) == len(attention["labels"]) == 24
+    if name == "frozen_evidence_closed":
+        # noise in the evidence only: the rationale itself stays clean
+        assert all(entry["replace_ratio"]["replace_train_ratio"] == 0 for entry in metrics)
+        # phrases: several tokens per span
+        assert results["selection"]["mean_span_length"] > 1.5
+        # the same model scored on the other end of long texts and with single tokens
+        run(run_words, monkeypatch, "--evaluate", "--freeze_encoder_bb", "--seed", 0, *common(model_path, str(work_path / "data"), save_path))
+        other = load(save_path, "results.json")
+        assert other["truncation"]["gold_words_surviving"] != results["truncation"]["gold_words_surviving"]
+        assert other["selection"]["mean_span_length"] < results["selection"]["mean_span_length"]
+    else:
+        assert all(entry["replace_ratio"]["replace_train_ratio"] > 0 for entry in metrics)
+
+
+def test_coupling_requires_noise_on_the_rationale(monkeypatch, work_path, model_path):
+    for argv in (["--coupling_weight", 0.5], ["--coupling_weight", 0.5, "--inject_noise", "--noise_target", "evidence"]):
+        with pytest.raises(ValueError):
+            train_and_evaluate(monkeypatch, work_path, model_path, "bad_coupling", *argv)
+
+
 def test_decaying_schedule_requires_p0(monkeypatch, work_path, model_path):
     with pytest.raises(ValueError):
         train_and_evaluate(monkeypatch, work_path, model_path, "no_p0", "--inject_noise", "--noise_schedule", "cosine")

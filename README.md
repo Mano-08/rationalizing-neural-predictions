@@ -37,13 +37,19 @@ dataset).
 | `--legacy_alignment` | Trains with the released (shifted) alignment between selection and predictor input, see above. |
 | `--noise_schedule=constant` | Fixed noise level `--noise_p` (original NI, the default). |
 | `--noise_schedule=exponential\|cosine\|linear` | Open-loop decay from `--noise_p0` to `--noise_p`. `--noise_gamma` is the exponential decay rate **per epoch**. |
-| `--noise_schedule=closed_loop` | PI controller on a degeneracy signal, starting at `--noise_p` and kept within `--noise_p_min`/`--noise_p_max`. `--ctrl_signal=jsd` raises noise when the two predictors disagree on the clean rationale (probed every `--ctrl_probe_every` steps), `--ctrl_signal=entropy` when the generator's attention collapses. `--ctrl_target`, `--ctrl_kp`, `--ctrl_ki` and `--ctrl_ema` set the target, gains and smoothing. |
+| `--noise_schedule=closed_loop` | PI controller on a degeneracy signal, starting at `--noise_p` and kept within `--noise_p_min`/`--noise_p_max`. `--ctrl_signal=jsd` raises noise when the two predictors disagree on the clean rationale (probed every `--ctrl_probe_every` steps), `--ctrl_signal=entropy` when the generator's attention collapses, `--ctrl_signal=exposure` when the rationale holds many of the words noise injection targets. `--ctrl_target`, `--ctrl_kp`, `--ctrl_ki` and `--ctrl_ema` set the target, gains and smoothing. |
+| `--noise_target=evidence` | Puts the noise into the evidence the generator's own (attention-based) predictor pools instead of into the rationale: the state pooled at a token is replaced by the state of a random token. `both` does both. Noise on the rationale alone never reaches the generator, which receives no gradient from the rationale predictor. |
 | `--noise_source=mlm` | Replaces tokens with in-context substitutes instead of words drawn from the vocabulary. Requires `build_mlm_replacements.py`. |
 | `--replacement_probs=saliency` | Chooses tokens to replace by contextual saliency instead of TF*IDF. Requires `build_saliency_probs.py`. |
 | `--mask_special_tokens` | Keeps `[SEP]` and `[PAD]` out of the attention and of the rationale. Use it for all models of a comparison or for none. |
+| `--truncation_side=left` | Keeps the end of texts longer than `--max_length` instead of the beginning. On USR Movies the end holds more of the human rationales (68% of them survive instead of 54%). |
+| `--selection_window=5` | Ranks tokens by their attention averaged over 5 tokens (any odd number), which selects phrases instead of scattered tokens. |
+| `--freeze_encoder_bb` | Original option: keeps the generator's encoder at its pretrained weights ("fixed gen. weights" in the paper). |
+| `--generator_layers=N` | Uses only the first N layers of the generator's encoder. |
+| `--coupling_weight=W` | Lets the loss of the rationale predictor reach the generator (straight-through), which the original model never does. Requires `--inject_noise`; use `--noise_p=0` to couple without noise. Experimental. |
 | `--train_subset`, `--valid_subset`, `--test_subset` | Use the first documents only, for a fast debugging loop. |
 
-The noise level realized between validations is logged to `checkpoints/metrics.json` (`noise.p_mean`). Validation is always noise-free.
+The noise level realized between validations is logged to `checkpoints/metrics.json` (`noise.p_mean`), together with `noise.exposure`: the mean replacement probability of the selected words at p = 1. It is 1 for a random rationale and falls below 1 only if the generator avoids the words noise injection targets. Validation is always noise-free.
 
 One-time preparation for the options above:
 
@@ -67,7 +73,9 @@ One-time preparation for the options above:
 | `comp_suff_prob` | Comprehensiveness and sufficiency of the rationale predictor computed on probabilities. `comp_suff` applies a sigmoid to probabilities, which confines each term to [0.5, 0.73]. |
 | `faithfulness_judge` | With `--faithfulness_model=trained/full_text/checkpoints/full_text.pt`: comprehensiveness and sufficiency according to the independent classifier, their normalized variants (Carton et al., 2020), and AOPC curves over `--aopc_bins`. |
 
-`--selection_method=random` evaluates a checkpoint with tokens selected uniformly at random (random-mask control). `per_example.json` holds per-document counts.
+`--selection_method=random` evaluates a checkpoint with tokens selected uniformly at random (random-mask control). `per_example.json` holds per-document counts. `--save_attention` writes the attention of every test token to `attention.npz`.
+
+`--truncation_side` and `--selection_window` can also be given at evaluation only, to score a trained model on the other end of long texts or with phrases.
 
     python aggregate_results.py --runs ni="trained/ni_seed*" ours="trained/ours_seed*" --baseline=ni
 

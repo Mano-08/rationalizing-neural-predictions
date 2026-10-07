@@ -223,3 +223,138 @@ def test_mlm_extractor_uses_cached_substitutes(tokenizer, data_path, tmp_path):
         extractor.extract_rationale(review + ["extra"], indices, np.ones(len(review), dtype = int), doc_id = 0)
     with pytest.raises(ValueError):
         extractor.extract_rationale(review, indices, np.ones(len(review), dtype = int), doc_id = len(lengths))
+
+
+def test_selection_window_selects_phrases(tokenizer):
+    batch = make_batch(tokenizer)
+    selectable = get_selectable(batch.reviews_tokenized, tokenizer)
+    # two isolated peaks in the first document
+    token_att = torch.full(selectable.shape, 0.001)
+    token_att[0, 3] = 0.3
+    token_att[0, 11] = 0.3
+    kwargs = dict(token_att = token_att.unsqueeze(-1), input_ids = batch.reviews_tokenized.input_ids, selectable = selectable)
+    scattered = make_selector(sparsity = 0.4)(**kwargs).squeeze(-1)
+    phrases = make_selector(sparsity = 0.4, window = 3)(**kwargs).squeeze(-1)
+    # same number of tokens, never a special token
+    assert scattered.sum(-1).tolist() == phrases.sum(-1).tolist() == [6, 1]
+    assert not (phrases & ~selectable).any()
+    # the window turns the two peaks into two phrases of three tokens
+    assert phrases[0].nonzero().flatten().tolist() == [2, 3, 4, 10, 11, 12]
+    assert scattered[0, [3, 11]].all() and not scattered[0, [2, 4, 10, 12]].all()
+    with pytest.raises(ValueError):
+        from models import SelectorFactory
+        SelectorFactory(0.2, 32, 0, "cpu", window = 4).create_selector("words")
+
+
+def test_truncation_side_keeps_word_indices(tokenizer):
+    review = ["good"] * 20 + ["bad"] * 20
+    try:
+        tokenizer.truncation_side = "left"
+        tail = make_batch(tokenizer, [review], max_length = 12)
+    finally:
+        tokenizer.truncation_side = "right"
+    head = make_batch(tokenizer, [review], max_length = 12)
+    # word indices still refer to the whole document, whichever end is kept
+    assert [word_id for word_id in head.reviews_tokenized.word_ids(0) if word_id is not None] == list(range(10))
+    assert [word_id for word_id in tail.reviews_tokenized.word_ids(0) if word_id is not None] == list(range(30, 40))
+
+
+def test_generator_can_use_lower_layers_only(model_path, tokenizer):
+    from models import BlackBoxPredictor
+    batch = make_batch(tokenizer)
+    torch.manual_seed(0)
+    full = BlackBoxPredictor(num_labels = 2, model = model_path, freeze_encoder = False).eval()
+    torch.manual_seed(0)
+    shallow = BlackBoxPredictor(num_labels = 2, model = model_path, freeze_encoder = False, num_layers = 1).eval()
+    assert len(full.encoder.encoder.layer) == 2 and len(shallow.encoder.encoder.layer) == 1
+    with torch.no_grad():
+        prediction, token_att = shallow(**batch.reviews_tokenized)
+    assert prediction.shape == (2, 2) and token_att.shape == (2, batch.reviews_tokenized.input_ids.shape[1] - 1, 1)
+    # the checkpoint of a shallow generator loads into a shallow generator only
+    shallow.load_state_dict(shallow.state_dict())
+    with pytest.raises(RuntimeError):
+        shallow.load_state_dict(full.state_dict())
+
+
+def test_exposure_measures_how_much_noise_targets_the_rationale(tokenizer, data_path):
+    batch, hard_mask = make_noisy_batch(tokenizer, data_path)
+    extractor = RandomNoisyRationaleExtractor(tokenizer = tokenizer, device = "cpu", data_path = data_path, seed = 0)
+    # the whole document: exposure is the mean replacement probability, 1
+    extractor.extract_from_mask_with_replacement(batch, hard_mask)
+    assert extractor.exposure == pytest.approx(1.0, abs = 0.05)
+    # only the word noise injection protects the most in every document
+    protected = torch.zeros_like(hard_mask)
+    for i, probs in enumerate(batch.replacement_probs):
+        word = int(np.argmin(probs))
+        positions = [position for position, word_id in enumerate(batch.reviews_tokenized.word_ids(i)[1:]) if word_id == word]
+        if positions:
+            protected[i, positions] = True
+    extractor.extract_from_mask_with_replacement(batch, protected)
+    assert extractor.exposure < 0.3
+
+
+def test_coupling_gate_leaves_the_input_alone_and_carries_the_gradient(model_path, tokenizer, data_path):
+    from models import BlackBoxPredictor, RationalePredictor
+    batch, _ = make_noisy_batch(tokenizer, data_path, num_documents = 4)
+    torch.manual_seed(0)
+    bb_model = BlackBoxPredictor(num_labels = 2, model = model_path, freeze_encoder = False).eval()
+    rp_model = RationalePredictor(num_labels = 2, model = model_path, freeze_encoder = False).eval()
+    selectable = get_selectable(batch.reviews_tokenized, tokenizer)
+    _, token_att = bb_model(**batch.reviews_tokenized, selectable = selectable)
+    hard_mask = make_selector(sparsity = 0.3)(token_att = token_att, input_ids = batch.reviews_tokenized.input_ids, selectable = selectable)
+    extractor = RandomNoisyRationaleExtractor(tokenizer = tokenizer, device = "cpu", data_path = data_path, seed = 0)
+    extractor.noise_p = 0.3
+    rationale, _, _ = extractor(batch, hard_mask)
+    gate = extractor.get_gate(batch, token_att, rationale, weight = 1.0)
+    # the predictor sees exactly the same input with and without the gate
+    assert torch.equal(gate.detach(), torch.ones_like(gate))
+    with torch.no_grad():
+        plain = rp_model(**rationale)
+    gated = rp_model(**rationale, gate = gate)
+    assert torch.allclose(plain, gated, atol = 1e-6)
+    # without the gate the predictor's loss cannot reach the generator
+    assert not plain.requires_grad
+    loss = torch.nn.functional.cross_entropy(gated, torch.tensor([0, 1, 0, 1]))
+    gradient = torch.autograd.grad(loss, token_att)[0].squeeze(-1)
+    # the gradient lands on the tokens of the selected words (the predictor
+    # gets whole words) and nowhere else
+    selected = torch.zeros_like(selectable)
+    for i, words in enumerate(extractor.selected_words):
+        word_ids = batch.reviews_tokenized.word_ids(i)[1:]
+        selected[i] = torch.tensor([word_id in set(words) for word_id in word_ids])
+    assert (selected >= (hard_mask.squeeze(-1) & selectable)).all()
+    assert gradient[selected].abs().sum() > 0
+    assert gradient[~selected].abs().sum() == 0
+    # twice the weight, twice the gradient
+    double = extractor.get_gate(batch, token_att, rationale, weight = 2.0)
+    double_loss = torch.nn.functional.cross_entropy(rp_model(**rationale, gate = double), torch.tensor([0, 1, 0, 1]))
+    assert torch.allclose(torch.autograd.grad(double_loss, token_att)[0].squeeze(-1), 2 * gradient, rtol = 1e-4, atol = 1e-8)
+
+
+def test_evidence_noise_replaces_pooled_states_only(model_path, tokenizer, data_path):
+    from models import BlackBoxPredictor, get_replacement_probs
+    batch, _ = make_noisy_batch(tokenizer, data_path, num_documents = 4)
+    torch.manual_seed(0)
+    bb_model = BlackBoxPredictor(num_labels = 2, model = model_path, freeze_encoder = True).eval()
+    probs = get_replacement_probs(batch, "cpu")
+    # one probability per word token, -1 for SEP and PAD
+    selectable = get_selectable(batch.reviews_tokenized, tokenizer)
+    assert ((probs >= 0) == selectable).all()
+    for i, replacement_probs in enumerate(batch.replacement_probs):
+        word_ids = batch.reviews_tokenized.word_ids(i)[1:]
+        assert probs[i, 0].item() == pytest.approx(replacement_probs[word_ids[0]])
+    with torch.no_grad():
+        clean_pred, clean_att = bb_model(**batch.reviews_tokenized)
+        zero_pred, zero_att = bb_model(**batch.reviews_tokenized, evidence_noise = torch.where(probs >= 0, 0.0, -1.0))
+        noisy_pred, noisy_att = bb_model(**batch.reviews_tokenized, evidence_noise = torch.where(probs >= 0, 1.0, -1.0))
+    # the attention is computed on the clean input whatever the noise
+    assert torch.equal(clean_att, zero_att) and torch.equal(clean_att, noisy_att)
+    # no noise: same prediction; every state replaced: a different one
+    assert torch.equal(clean_pred, zero_pred)
+    assert not torch.allclose(clean_pred, noisy_pred)
+    # the gradient of the noisy prediction still reaches the token scorer
+    bb_model.train()
+    prediction, _ = bb_model(**batch.reviews_tokenized, evidence_noise = torch.where(probs >= 0, 0.5, -1.0))
+    prediction[:, 0].sum().backward()
+    assert bb_model.token_predictor[1].weight.grad.abs().sum() > 0
+    assert bb_model.encoder.embeddings.word_embeddings.weight.grad is None

@@ -30,6 +30,7 @@ def parse_args():
     parser.add_argument('--save_path', type = str, default = os.path.join("trained", "full_text"))
     parser.add_argument('--model', type = str, default = 'bert-base-uncased')
     parser.add_argument('--max_length', type = int, default = 512)
+    parser.add_argument('--truncation_side', choices = ['right', 'left'], default = 'right')
     parser.add_argument('--batch_size', type = int, default = 16)
     parser.add_argument('--data_path', type = str, default = os.path.join("..", "..", "rnp_movie_review", "original"))
     parser.add_argument('--seed', type = int, default = None)
@@ -72,6 +73,7 @@ def main(args):
         set_seed(args.seed)
 
     tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast = True)
+    tokenizer.truncation_side = args.truncation_side
     model = FullTextClassifier(num_labels = 2, model = args.model).to(args.device)
     checkpoint_path = get_checkpoint_path(args.save_path)
 

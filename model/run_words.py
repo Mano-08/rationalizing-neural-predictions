@@ -18,7 +18,7 @@ from metrics import (normalized_faithfulness, plausibility, reference_points,
                      to_gold_words)
 from models import (BlackBoxPredictor, FullTextClassifier, RationaleExtractor,
                     RationaleExtractorFactory, RationalePredictor,
-                    SelectorFactory, get_selectable)
+                    SelectorFactory, get_replacement_probs, get_selectable)
 from movies import REPLACEMENT_PROBS, DataLoaderFactory
 from noise import (SCHEDULES, SIGNALS, ConstantSchedule, create_noise_schedule,
                    js_div_per_example, normalized_attention_entropy)
@@ -50,6 +50,9 @@ def parse_args():
     parser.add_argument('--ctrl_ki', type = float, default = 0.001)
     parser.add_argument('--ctrl_ema', type = float, default = 0.99)
     parser.add_argument('--ctrl_probe_every', type = int, default = 10)
+    # Where the noise goes: into the rationale the predictor reads (as
+    # released), into the evidence the generator's own predictor pools, or both
+    parser.add_argument('--noise_target', choices = ['rationale', 'evidence', 'both'], default = 'rationale')
     # What to replace tokens with: words sampled from the vocabulary or
     # in-context substitutes precomputed by build_mlm_replacements.py
     parser.add_argument('--noise_source', choices = ['vocab', 'mlm'], default = 'vocab')
@@ -58,6 +61,17 @@ def parse_args():
     # Reproduce the released noise injection, which trains the predictor on
     # the token before every selected token (off-by-one from the CLS token)
     parser.add_argument('--legacy_alignment', action = "store_true")
+    # Let the loss of the rationale predictor reach the generator (straight-
+    # through). 0 = as released: the generator never learns from the
+    # predictor which of its selected words were useful
+    parser.add_argument('--coupling_weight', type = float, default = 0.0)
+    # Use only the first layers of the generator's encoder
+    parser.add_argument('--generator_layers', type = int, default = None)
+    # Rank tokens by attention averaged over this many tokens (odd number)
+    parser.add_argument('--selection_window', type = int, default = 1)
+    # Which end of a text longer than max_length to cut off: right keeps the
+    # beginning, left keeps the end
+    parser.add_argument('--truncation_side', choices = ['right', 'left'], default = 'right')
     # Random seed
     parser.add_argument('--seed', type = int, default = None)
     # Device
@@ -101,6 +115,8 @@ def parse_args():
     # used to measure faithfulness, and selection rates of its AOPC curves
     parser.add_argument('--faithfulness_model', type = str, default = None)
     parser.add_argument('--aopc_bins', type = float, nargs = '*', default = [0.01, 0.05, 0.1, 0.2, 0.5])
+    # Save the attention of every test token to attention.npz
+    parser.add_argument('--save_attention', action = "store_true")
     return parser.parse_args()
 
 
@@ -121,14 +137,15 @@ def main(args):
         set_seed(args.seed)
 
     tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast = True)
+    tokenizer.truncation_side = args.truncation_side
 
-    bb_model = BlackBoxPredictor(num_labels = 2, model = args.model, freeze_encoder = args.freeze_encoder_bb).to(args.device)
+    bb_model = BlackBoxPredictor(num_labels = 2, model = args.model, freeze_encoder = args.freeze_encoder_bb, num_layers = args.generator_layers).to(args.device)
     print(f"Black Box Predictor: {get_num_params(bb_model)} parameters")
 
     rp_model = RationalePredictor(num_labels = 2, model = args.model, freeze_encoder = args.freeze_encoder_rp).to(args.device)
     print(f"Rationale Predictor: {get_num_params(rp_model)} parameters")
 
-    rationale_selector = SelectorFactory(args.sparsity, args.max_length, tokenizer.pad_token_id, args.device, args.seed).create_selector(args.selection_method)
+    rationale_selector = SelectorFactory(args.sparsity, args.max_length, tokenizer.pad_token_id, args.device, args.seed, args.selection_window).create_selector(args.selection_method)
 
     if args.mask_special_tokens:
         selectable_fn = lambda reviews_tokenized: get_selectable(reviews_tokenized, tokenizer)
@@ -136,11 +153,13 @@ def main(args):
         selectable_fn = lambda reviews_tokenized: None
 
     if args.train:
+        if args.coupling_weight > 0 and not (args.inject_noise and args.noise_target != 'evidence'):
+            raise ValueError('--coupling_weight requires --inject_noise with noise on the rationale (use --noise_p 0 to couple without noise)')
         os.makedirs(checkpoint_dir, exist_ok = True)
         with open(os.path.join(args.save_path, "config.json"), "w") as f:
             json.dump(vars(args), f, indent = 2)
 
-        rationale_extractor = RationaleExtractorFactory(tokenizer, args.device, args.data_path, args.seed, args.legacy_alignment).create_extractor(args.inject_noise, args.noise_source)
+        rationale_extractor = RationaleExtractorFactory(tokenizer, args.device, args.data_path, args.seed, args.legacy_alignment).create_extractor(args.inject_noise and args.noise_target != 'evidence', args.noise_source)
 
         train_loader = DataLoaderFactory(
             data_path = args.data_path,
@@ -169,7 +188,7 @@ def main(args):
 
         if args.inject_noise:
             if args.ctrl_target is None:
-                args.ctrl_target = 0.8 if args.ctrl_signal == 'entropy' else 0.05
+                args.ctrl_target = {'entropy': 0.8, 'exposure': 0.8}.get(args.ctrl_signal, 0.05)
             noise_schedule = create_noise_schedule(
                 args = args,
                 steps_per_epoch = len(train_loader),
@@ -196,6 +215,8 @@ def main(args):
             validation_rationale_extractor = validation_rationale_extractor,
             noise_schedule = noise_schedule,
             selectable_fn = selectable_fn,
+            coupling_weight = args.coupling_weight,
+            evidence_noise = args.inject_noise and args.noise_target != 'rationale',
         )
 
     if args.evaluate:
@@ -229,7 +250,8 @@ def main(args):
             selectable_fn = selectable_fn,
             eval_sparsities = args.eval_sparsities,
             judge = judge,
-            aopc_bins = args.aopc_bins
+            aopc_bins = args.aopc_bins,
+            save_attention = args.save_attention
         )
 
 def train(
@@ -250,6 +272,8 @@ def train(
     validation_rationale_extractor,
     noise_schedule,
     selectable_fn,
+    coupling_weight = 0.0,
+    evidence_noise = False,
     ):
 
     with tqdm(total=num_epochs * len(train_loader)) as pb:
@@ -266,6 +290,7 @@ def train(
         running_train_replace_ratio = 0.0
         running_valid_replace_ratio = 0.0
         running_noise_p = 0.0
+        running_exposure = 0.0
         global_step = 0
         metrics = []
         patience_left = patience
@@ -283,7 +308,20 @@ def train(
                 # generate prediction and token probs of being in a rationale
                 batch.reviews_tokenized = batch.reviews_tokenized.to(device)
                 selectable = selectable_fn(batch.reviews_tokenized)
-                att_pred, token_att = bb_model(**batch.reviews_tokenized, selectable = selectable)
+
+                # set the noise level of this step
+                noise_p = noise_schedule.value(global_step)
+                rationale_extractor.noise_p = noise_p
+
+                if evidence_noise:
+                    replacement_probs = get_replacement_probs(batch, device)
+                    att_pred, token_att = bb_model(
+                        **batch.reviews_tokenized,
+                        selectable = selectable,
+                        evidence_noise = torch.where(replacement_probs >= 0, (replacement_probs * noise_p).clamp(max = 1), replacement_probs)
+                    )
+                else:
+                    att_pred, token_att = bb_model(**batch.reviews_tokenized, selectable = selectable)
 
                 hard_mask = rationale_selector(
                     token_att = token_att,
@@ -291,23 +329,32 @@ def train(
                     selectable = selectable
                 )
 
-                # set the noise level of this step
-                noise_p = noise_schedule.value(global_step)
-                rationale_extractor.noise_p = noise_p
-
                 rationale, _, replace_ratio = rationale_extractor(
                     batch = batch,
                     hard_mask = hard_mask
                 )
 
                 # predict from rationale
-                hard_pred = rp_model(**rationale)
+                if coupling_weight > 0:
+                    gate = rationale_extractor.get_gate(batch, token_att, rationale, coupling_weight)
+                    hard_pred = rp_model(**rationale, gate = gate)
+                else:
+                    hard_pred = rp_model(**rationale)
+
+                # how much noise injection targets what the generator picks:
+                # its attention if the noise is in its evidence, else its rationale
+                if evidence_noise:
+                    exposure = (token_att.detach().squeeze(-1) * replacement_probs.clamp(min = 0)).sum(-1).mean().item()
+                else:
+                    exposure = getattr(rationale_extractor, "exposure", 1.0)
 
                 # measure the degeneracy signal of the closed-loop controller,
                 # the new noise level applies from the next step
                 if noise_schedule.closed_loop:
                     if noise_schedule.signal == 'entropy':
                         noise_schedule.update(normalized_attention_entropy(token_att.detach(), selectable).mean().item())
+                    elif noise_schedule.signal == 'exposure':
+                        noise_schedule.update(exposure)
                     elif noise_schedule.needs_probe(global_step):
                         # disagreement of the two predictors on the CLEAN
                         # rationale, as disagreement on the noisy one would
@@ -335,8 +382,13 @@ def train(
                 bb_optimizer.zero_grad()
                 rp_optimizer.zero_grad()
 
-                bb_loss.backward()
-                rp_loss.backward()
+                if coupling_weight > 0:
+                    # the loss of the rationale predictor also reaches the
+                    # generator, through the gate
+                    (bb_loss + rp_loss).backward()
+                else:
+                    bb_loss.backward()
+                    rp_loss.backward()
 
                 bb_optimizer.step()
                 rp_optimizer.step()
@@ -348,6 +400,7 @@ def train(
                 rp_running_train_loss += rp_loss.item()
                 running_train_replace_ratio += replace_ratio
                 running_noise_p += noise_p
+                running_exposure += exposure
                 global_step += 1
 
                 # validation step
@@ -398,6 +451,7 @@ def train(
                     rp_average_train_loss = rp_running_train_loss / eval_every
                     average_train_replace_ratio = running_train_replace_ratio / eval_every
                     average_noise_p = running_noise_p / eval_every
+                    average_exposure = running_exposure / eval_every
 
                     bb_average_valid_loss = bb_running_valid_loss / len(valid_loader)
                     rp_average_valid_loss = rp_running_valid_loss / len(valid_loader)
@@ -428,6 +482,9 @@ def train(
                         "noise": {
                             "p_mean": average_noise_p,
                             "p_next": noise_schedule.value(global_step),
+                            # 1 = the rationale holds as many of the words noise
+                            # injection targets as a random rationale would
+                            "exposure": average_exposure,
                             **noise_schedule.state()
                         },
                         "patience_left": patience_left,
@@ -445,6 +502,7 @@ def train(
                     rp_running_train_loss = 0.0
                     running_train_replace_ratio = 0.0
                     running_noise_p = 0.0
+                    running_exposure = 0.0
                     bb_running_valid_loss = 0.0
                     rp_running_valid_loss = 0.0
                     running_valid_replace_ratio = 0.0
@@ -452,6 +510,7 @@ def train(
                     # print progress
                     pb.write(f'Epoch [{epoch+1}/{num_epochs}], Step [{global_step}/{num_epochs*len(train_loader)}]')
                     pb.write(f'Noise p: {average_noise_p:.4f}')
+                    pb.write(f'Exposure of the rationale to noise: {average_exposure:.4f}')
                     pb.write(f'Train Probability of Replacement: {average_train_replace_ratio * 100:.4f}')
                     pb.write(f'Valid Probability of Replacement: {average_valid_replace_ratio * 100:.4f}')
                     pb.write(f'BB Train Loss: {bb_average_train_loss:.4f}, BB Valid Loss: {bb_average_valid_loss:.4f}')
@@ -485,7 +544,8 @@ def evaluate(
     selectable_fn = lambda reviews_tokenized: None,
     eval_sparsities = (),
     judge = None,
-    aopc_bins = ()):
+    aopc_bins = (),
+    save_attention = False):
 
     if checkpoint_dir is not None:
         print('Loading BB model')
@@ -533,6 +593,7 @@ def evaluate(
     counts = []
     counts_at_k = {sparsity: [] for sparsity in eval_sparsities}
     reviews = []
+    attention_dump = {"attention": [], "word_ids": [], "gold": [], "selected": []}
 
     aopc_bins = aopc_bins if judge is not None else ()
     selectors_at_k = {
@@ -633,6 +694,12 @@ def evaluate(
                 rat_mask = torch.tensor([word_id in gold_words for word_id in word_ids])
 
                 counts.append(selection_counts(word_ids, gen_mask.tolist(), gold_words))
+                if save_attention:
+                    # one entry per token after CLS; -1 = SEP/PAD
+                    attention_dump["attention"].append(token_att[i, :, 0].float().cpu().numpy().astype(np.float32))
+                    attention_dump["word_ids"].append(np.array([-1 if word_id is None else word_id for word_id in word_ids[1:]], dtype = np.int32))
+                    attention_dump["gold"].append(rat_mask[1:].numpy())
+                    attention_dump["selected"].append(gen_mask[1:].numpy())
                 for sparsity in eval_sparsities:
                     counts_at_k[sparsity].append(selection_counts(word_ids, [False] + masks_at_k[sparsity][i, :, :].squeeze(-1).tolist(), gold_words))
                 reviews.append(batch.reviews[i])
@@ -751,6 +818,16 @@ def evaluate(
         "accuracy": classification_report(y_true, y_pred, labels=[1,0], digits=4, output_dict=True, zero_division=0)["accuracy"],
         "accuracy_attention_predictor": float(np.mean([pred == label for pred, label in zip(y_pred_bb, y_true)]))
     }
+
+    if save_attention:
+        # documents are padded to different lengths, so arrays are stored flat
+        lengths = np.array([len(attention) for attention in attention_dump["attention"]])
+        np.savez_compressed(
+            os.path.join(result_path, "attention.npz"),
+            lengths = lengths,
+            labels = np.array(y_true),
+            **{key: np.concatenate(values) for key, values in attention_dump.items()}
+        )
 
     if not show_detail:
         save_results(results, result_path)
