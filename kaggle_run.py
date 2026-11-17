@@ -49,6 +49,14 @@
 # TRUNCATION and WINDOW below change what every training stage does and are
 # part of the run name (ni_tail_w5_seed1), so runs with different settings
 # do not overwrite each other.
+#
+# DATASET = "multirc" or "fever" runs the ERASER datasets with sentence-level
+# rationales through model/run_ce.py instead (see TO_RUN.md). "setup"
+# downloads and preprocesses the dataset. Available stages: setup, smoke, a2r,
+# ni, released, frozen, probe (random-selection control), pack. Run names
+# start with the dataset (multirc_ni_seed1); TRUNCATION and WINDOW do not
+# apply. The noise level is that of Storek et al. (2023) for the dataset;
+# epochs, patience and validation as in the USR runs.
 
 import glob
 import json
@@ -71,6 +79,18 @@ EVIDENCE_P = 0.3       # noise level of frozen_en
 EXPOSURE = 0.9         # exposure the controller of frozen_closed holds
 TRUNCATION = "right"   # reviews longer than 512 tokens: "right" keeps the beginning, "left" keeps the end
 WINDOW = 1             # rank tokens by attention averaged over this many tokens (odd); 5 selects phrases
+DATASET = "usr"        # "usr" (USR Movie Review), "multirc" or "fever"
+TIME_LIMIT_HOURS = 9.5 # MultiRC/FEVER: stop training after this long and evaluate the best checkpoint,
+                       # so that a run fits into a 12-hour Kaggle session
+
+# MultiRC/FEVER: noise level of Storek et al. (2023) for the dataset; epochs,
+# patience and one validation per epoch as in our USR runs (run_words.py)
+CE = {
+    "multirc": {"p": 0.3, "epochs": 5, "patience": 2},
+    "fever": {"p": 0.05, "epochs": 5, "patience": 2},
+}
+ERASER_URL = "http://www.eraserbenchmark.com/zipped/{}.tar.gz"
+DATA_DIR = "/kaggle/working/data"
 
 REPO_URL = "https://github.com/Mano-08/rationalizing-neural-predictions.git"
 BRANCH = "ani"
@@ -100,7 +120,15 @@ INPUTS = "/kaggle/input"
 _parallel = threading.local()
 
 
+def is_ce():
+    if DATASET not in ["usr"] + list(CE):
+        raise ValueError(f"Unknown DATASET {DATASET!r}: use 'usr', 'multirc' or 'fever'")
+    return DATASET in CE
+
+
 def data_path():
+    if is_ce():
+        return os.path.join(DATA_DIR, DATASET)
     return os.path.join(REPO, "usr_movie_review")
 
 
@@ -128,6 +156,8 @@ def selection():
 
 
 def run_name(name):
+    if is_ce():
+        return f"{DATASET}_{name}_seed{SEED}"
     return name + ("_tail" if TRUNCATION == "left" else "") + (f"_w{WINDOW}" if WINDOW > 1 else "") + f"_seed{SEED}"
 
 
@@ -161,6 +191,34 @@ def clone():
         sh("git", "clone", "-b", BRANCH, REPO_URL, REPO)
 
 
+def ce_common():
+    # options of run_ce.py shared by training and evaluation
+    return ["--dataset", DATASET, "--data_path", data_path(), "--batch_size", BATCH, "--seed", SEED,
+            "--selection_method", "sentences"] + device_args()
+
+
+def ce_train_run(name, *args):
+    # one full training + evaluation on MultiRC or FEVER
+    name = run_name(name)
+    save_path = os.path.join(OUT, name)
+    if os.path.exists(os.path.join(save_path, "results.json")):
+        print(f"== {name} is finished, skipping")
+        return
+    need(os.path.join(data_path(), "word_statistics", "train_replacement_probs.pkl"), "setup")
+    if TRUNCATION != "right" or WINDOW != 1:
+        print("Note: TRUNCATION and WINDOW do not apply to MultiRC/FEVER and are ignored")
+    settings = CE[DATASET]
+    print(f"== {name}")
+    python("run_ce.py", "--train", "--evaluate", *ce_common(), "--num_epochs", settings["epochs"],
+           "--patience", settings["patience"], "--validations_per_epoch", 1, "--time_limit_hours", TIME_LIMIT_HOURS,
+           "--save_path", save_path, *args)
+
+
+def not_for_ce(stage):
+    if is_ce():
+        raise RuntimeError(f"Stage '{stage}' is not available for {DATASET}; see TO_RUN.md")
+
+
 def train_run(name, *args):
     # one full training + evaluation
     name = run_name(name)
@@ -174,18 +232,51 @@ def train_run(name, *args):
     python("run_words.py", "--train", "--evaluate", *common(), *selection(), *judge, "--save_path", save_path, *args)
 
 
+def ce_setup():
+    # download the ERASER dataset, then preprocess it as in the README
+    if os.path.exists(os.path.join(data_path(), "word_statistics", "train_replacement_probs.pkl")):
+        print(f"{DATASET} is ready in {data_path()}")
+        return
+    import nltk
+    for resource in ["punkt", "punkt_tab"]:
+        nltk.download(resource, quiet = True)
+    raw = os.path.join(DATA_DIR, "raw")
+    os.makedirs(raw, exist_ok = True)
+    archive = os.path.join(raw, f"{DATASET}.tar.gz")
+    if not os.path.exists(os.path.join(raw, DATASET, "train.jsonl")):
+        import urllib.request
+        print(f"Downloading {ERASER_URL.format(DATASET)}", flush = True)
+        urllib.request.urlretrieve(ERASER_URL.format(DATASET), archive)
+        with tarfile.open(archive) as tar:
+            tar.extractall(raw, **({"filter": "data"} if hasattr(tarfile, "data_filter") else {}))
+    scripts = os.path.join(REPO, "data_preprocessing", DATASET)
+    sh(sys.executable, "prepare_dataset.py", f"--data_path={os.path.join(raw, DATASET)}", f"--save_path={data_path()}",
+       "--lower_case", cwd = scripts)
+    sh(sys.executable, "generate_word_statistics.py", f"--data_path={data_path()}", cwd = scripts)
+    sh("wc", "-l", *[os.path.join(data_path(), f"{split}.jsonl") for split in ["train", "valid", "test"]])
+
+
 def stage_setup():
     sh(sys.executable, "-m", "pip", "install", "-q", "termcolor")
     if shutil.which("nvidia-smi"):
         sh("nvidia-smi")
     else:
         print("No GPU found - switch the accelerator on")
+    if is_ce():
+        ce_setup()
+        return
     if not os.path.exists(stats_path("train_replacement_probs.pkl")):
         sh(sys.executable, "generate_word_statistics.py", f"--data_path={data_path()}",
            cwd = os.path.join(REPO, "data_preprocessing", "usr_movie_review"))
 
 
 def stage_smoke():
+    if is_ce():
+        need(os.path.join(data_path(), "word_statistics", "train_replacement_probs.pkl"), "setup")
+        python("run_ce.py", "--train", "--evaluate", "--inject_noise", "--noise_p", CE[DATASET]["p"], *ce_common(),
+               "--train_subset", 800, "--valid_subset", 200, "--test_subset", 200, "--num_epochs", 1,
+               "--save_path", os.path.join(OUT, f"{DATASET}_smoke"))
+        return
     need(stats_path("train_replacement_probs.pkl"), "setup")
     python("run_words.py", "--train", "--evaluate", "--inject_noise", "--noise_p", P, *common(), *selection(),
            "--train_subset", 800, "--valid_subset", 200, "--test_subset", 200, "--num_epochs", 1,
@@ -193,22 +284,30 @@ def stage_smoke():
 
 
 def stage_ni():
+    if is_ce():
+        # NI with the alignment fixed
+        return ce_train_run("ni", "--inject_noise", "--noise_p", CE[DATASET]["p"])
     need(stats_path("train_replacement_probs.pkl"), "setup")
     train_run("ni", "--inject_noise", "--noise_p", P)
 
 
 def stage_released():
+    if is_ce():
+        # NI with the alignment defect of the released code (training only)
+        return ce_train_run("released", "--inject_noise", "--noise_p", CE[DATASET]["p"], "--legacy_alignment")
     need(stats_path("train_replacement_probs.pkl"), "setup")
     # exactly as released, to compare with the published "tuned gen. weights + NI" row
     train_run("ni_released", "--inject_noise", "--noise_p", P, "--legacy_alignment")
 
 
 def stage_baseline():
+    not_for_ce("baseline")
     stage_ni()
     stage_released()
 
 
 def stage_control():
+    not_for_ce("control")
     source = os.path.join(OUT, run_name("ni"))
     need(os.path.join(source, "checkpoints", "bb_model.pt"), "ni")
     # evaluation overwrites results.json, so it runs on a copy
@@ -220,6 +319,7 @@ def stage_control():
 
 
 def stage_judge():
+    not_for_ce("judge")
     save_path = os.path.join(OUT, "full_text")
     if os.path.exists(os.path.join(save_path, "results.json")):
         print("== full_text is finished, skipping")
@@ -228,6 +328,7 @@ def stage_judge():
 
 
 def stage_rescore():
+    not_for_ce("rescore")
     need(judge_path(), "judge")
     # only valid for runs trained with the default selection options, as below
     for run_path in sorted(glob.glob(os.path.join(OUT, "*_seed*"))):
@@ -238,6 +339,7 @@ def stage_rescore():
 
 
 def stage_prep():
+    not_for_ce("prep")
     need(judge_path(), "judge")
     if not os.path.exists(stats_path("train_mlm_candidates.npy")):
         python("build_mlm_replacements.py", "--data_path", data_path())
@@ -246,22 +348,28 @@ def stage_prep():
 
 
 def stage_a2r():
+    if is_ce():
+        return ce_train_run("a2r")
     train_run("a2r")
 
 
 def stage_exp():
+    not_for_ce("exp")
     train_run("ani_exp", "--inject_noise", "--noise_schedule", "exponential", "--noise_p0", P0, "--noise_p", P, "--noise_gamma", GAMMA)
 
 
 def stage_cos():
+    not_for_ce("cos")
     train_run("ani_cos", "--inject_noise", "--noise_schedule", "cosine", "--noise_p0", P0, "--noise_p", P)
 
 
 def stage_closed():
+    not_for_ce("closed")
     train_run("ani_closed", "--inject_noise", "--noise_schedule", "closed_loop", "--ctrl_signal", "jsd", "--noise_p", P)
 
 
 def stage_full():
+    not_for_ce("full")
     need(stats_path("train_mlm_candidates.npy"), "prep")
     need(stats_path("train_replacement_probs_saliency.pkl"), "prep")
     train_run("full", "--inject_noise", "--noise_schedule", "closed_loop", "--ctrl_signal", "jsd", "--noise_p", P,
@@ -271,20 +379,25 @@ def stage_full():
 def stage_frozen():
     # the generator's encoder keeps its pretrained weights, only its two
     # linear layers are trained
+    if is_ce():
+        return ce_train_run("frozen", "--freeze_encoder_bb")
     train_run("frozen", "--freeze_encoder_bb")
 
 
 def stage_frozen_ni():
+    not_for_ce("frozen_ni")
     need(stats_path("train_replacement_probs.pkl"), "setup")
     train_run("frozen_ni", "--freeze_encoder_bb", "--inject_noise", "--noise_p", P)
 
 
 def stage_frozen_en():
+    not_for_ce("frozen_en")
     need(stats_path("train_replacement_probs.pkl"), "setup")
     train_run("frozen_en", "--freeze_encoder_bb", "--inject_noise", "--noise_target", "evidence", "--noise_p", EVIDENCE_P)
 
 
 def stage_frozen_closed():
+    not_for_ce("frozen_closed")
     need(stats_path("train_replacement_probs.pkl"), "setup")
     train_run("frozen_closed", "--freeze_encoder_bb", "--inject_noise", "--noise_target", "evidence",
               "--noise_schedule", "closed_loop", "--ctrl_signal", "exposure", "--ctrl_target", EXPOSURE,
@@ -315,7 +428,7 @@ def find_runs():
     for bb_path in here + attached:
         run_path = os.path.dirname(os.path.dirname(bb_path))
         name = os.path.basename(run_path)
-        if os.path.exists(os.path.join(run_path, "checkpoints", "rp_model.pt")) and "control_random" not in name and name != "smoke":
+        if os.path.exists(os.path.join(run_path, "checkpoints", "rp_model.pt")) and "control_random" not in name and "smoke" not in name:
             runs.setdefault(name, run_path)
     return runs
 
@@ -335,8 +448,40 @@ def probe_table():
         print(f"{row[0]:40s} " + " ".join(f"{value:5.1f}" for value in row[1:7]) + f" {row[7]:5.2f} {row[8]:5.1f}")
 
 
+def ce_probe():
+    # random-selection control for every run of this dataset; needs the
+    # checkpoints, so it runs in the session that trained the models
+    runs = {name: path for name, path in find_runs().items() if name.startswith(DATASET + "_") and "smoke" not in name}
+    if len(runs) == 0:
+        raise RuntimeError(f"No trained {DATASET} runs in {OUT}")
+    rows = []
+    for name, run_path in sorted(runs.items()):
+        probes = {"random": ["--random_selection"]}
+        for probe, options in probes.items():
+            target = os.path.join(OUT, "probe", f"{name}__{probe}")
+            if not os.path.exists(os.path.join(target, "results.json")):
+                os.makedirs(target, exist_ok = True)
+                link = os.path.join(target, "checkpoints")
+                if not os.path.lexists(link):
+                    os.symlink(os.path.join(run_path, "checkpoints"), link)
+                python("run_ce.py", "--evaluate", *ce_common(), "--save_path", target, *options)
+        for result_path in [os.path.join(run_path, "results.json")] + sorted(glob.glob(os.path.join(OUT, "probe", f"{name}__*", "results.json"))):
+            if not os.path.exists(result_path):
+                continue
+            with open(result_path) as f:
+                results = json.load(f)
+            micro = results["rationales"]["micro"]
+            rows.append((os.path.basename(os.path.dirname(result_path)), 100 * results["accuracy"], 100 * micro["prec"],
+                         100 * micro["rec"], 100 * micro["F1"], 100 * results.get("majority_class_share", float("nan"))))
+    print(f"{'run__setting':45s} {'Acc':>5s} {'P':>5s} {'R':>5s} {'F1':>5s} {'1cls%':>5s}")
+    for row in rows:
+        print(f"{row[0]:45s} " + " ".join(f"{value:5.1f}" for value in row[1:]))
+
+
 def stage_probe():
-    runs = find_runs()
+    if is_ce():
+        return ce_probe()
+    runs = {name: path for name, path in find_runs().items() if not name.startswith(tuple(f"{dataset}_" for dataset in CE))}
     if len(runs) == 0:
         raise RuntimeError(f"No trained runs in {OUT} or under {INPUTS}. Attach the output of an earlier session with Add Input")
     print(f"Runs: {', '.join(sorted(runs))}")
@@ -386,6 +531,7 @@ def stage_probe():
 
 
 def stage_table():
+    not_for_ce("table")
     # every group of finished runs that differ in their seed only
     groups = {}
     for result_path in sorted(glob.glob(os.path.join(OUT, "*_seed*", "results.json"))):
@@ -448,7 +594,7 @@ def run_parallel(*stages):
 
     jobs = []
     for stage, device in zip(stages, devices):
-        log_path = os.path.join(OUT, "logs", f"{stage}_seed{SEED}.log")
+        log_path = os.path.join(OUT, "logs", (f"{DATASET}_" if is_ce() else "") + f"{stage}_seed{SEED}.log")
         print(f"==== {stage} on {device}, log: {log_path}", flush = True)
         thread = threading.Thread(target = work, args = (stage, device, log_path))
         thread.start()
