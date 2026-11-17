@@ -11,9 +11,11 @@ from transformers import PreTrainedTokenizerBase
 
 
 class CEDataset(Dataset):
-    def __init__(self, data_path, split):
+    def __init__(self, data_path, split, subset = None):
         with open(os.path.join(data_path, f"{split}.jsonl"), "r") as f:
             self.data = [json.loads(line) for line in f.read().splitlines()]
+        if subset is not None:
+            self.data = self.data[:subset]
 
     def __len__(self):
         return len(self.data)
@@ -23,10 +25,10 @@ class CEDataset(Dataset):
 
  
 class CEDatasetWithReplacementProbs(CEDataset):
-    def __init__(self, data_path, split, noise_p):
-        super().__init__(data_path = data_path, split = split)
+    def __init__(self, data_path, split, noise_p, subset = None):
+        super().__init__(data_path = data_path, split = split, subset = subset)
         with open(os.path.join(data_path, "word_statistics", f"{split}_replacement_probs.pkl"), "rb") as f:
-            self.replacement_probs = pickle.load(f)
+            self.replacement_probs = pickle.load(f)[:len(self.data)]
         # Finish precomputing replacement probabilities
         for i, document_replacement_probs in enumerate(self.replacement_probs):
             for j, sentence_replacement_probs in enumerate(document_replacement_probs):
@@ -43,11 +45,12 @@ class CEDatasetFactory:
     data_path: str
     split: str
     noise_p: Optional[int] = None
+    subset: Optional[int] = None
 
     def create_dataset(self, inject_noise):
         if inject_noise:
-            return CEDatasetWithReplacementProbs(self.data_path, self.split, self.noise_p)
-        return CEDataset(self.data_path, self.split)
+            return CEDatasetWithReplacementProbs(self.data_path, self.split, self.noise_p, self.subset)
+        return CEDataset(self.data_path, self.split, self.subset)
 
 
 def get_evidences_flat(evidences):
@@ -234,9 +237,10 @@ class DataLoaderFactory:
     tokenizer: PreTrainedTokenizerBase
     max_length: int
     shuffle: Optional[bool] = True
+    subset: Optional[int] = None
 
     def create_dataloader(self, split, inject_noise):
-        dataset = CEDatasetFactory(self.data_path, split, self.noise_p).create_dataset(inject_noise)
+        dataset = CEDatasetFactory(self.data_path, split, self.noise_p, self.subset).create_dataset(inject_noise)
         collate_fn = CollatorFactory(self.tokenizer, self.max_length).create_collator(split, inject_noise)
 
         return DataLoader(

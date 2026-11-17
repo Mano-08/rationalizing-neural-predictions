@@ -13,12 +13,25 @@ from transformers import PreTrainedTokenizerBase
 class RationaleExtractor:
     tokenizer: PreTrainedTokenizerBase
     device: str
+    # True: the noisy extractor pairs selection and words as released
+    # (training only; see BaseNoisyRationaleExtractor)
+    legacy_alignment: bool = False
+    # True: the remainder used for comprehensiveness contains the query a
+    # second time, as released
+    legacy_selection: bool = False
+    # BERT reads at most this many tokens
+    max_length: int = 512
 
     def tokenize(self, query):
         return self.tokenizer(text = query, is_split_into_words = True, return_tensors = 'pt')
 
     def preprocess_mask(self, batch, hard_mask):
         hard_mask = hard_mask.squeeze()
+        if not self.legacy_selection:
+            # Only evidence tokens can belong to the rationale or the remainder;
+            # the query is added in front of either by extract()
+            for i in range(hard_mask.shape[0]):
+                hard_mask[i, :batch.evidences_start_no_cls(i)] = False
         # Mask PAD tokens
         hard_mask.masked_fill_(batch.tokenized_examples.input_ids[:, 1:] == self.tokenizer.pad_token_id, False) # [:, 1:] - ignore the CLS token
         # Unmask SEP tokens
@@ -38,6 +51,10 @@ class RationaleExtractor:
             rationale_ids = ids[1:].masked_select(mask).unsqueeze(0) # [1:] - ignore the CLS token
             input_ids[-1] = torch.cat((input_ids[-1], ids[1:].masked_select(mask).unsqueeze(0)), 1)
             attention_mask[-1] = torch.cat((attention_mask[-1], torch.ones_like(rationale_ids, device = self.device)), 1)
+            # keep the first max_length - 1 tokens and the final [SEP]
+            if input_ids[-1].shape[1] > self.max_length:
+                input_ids[-1] = torch.cat((input_ids[-1][:, :self.max_length - 1], input_ids[-1][:, -1:]), 1)
+                attention_mask[-1] = attention_mask[-1][:, :self.max_length]
         return input_ids, attention_mask
 
     def pad(self, input_ids, attention_mask):
@@ -78,7 +95,13 @@ class RationaleExtractor:
 
 @dataclass
 class BaseNoisyRationaleExtractor(RationaleExtractor):
-    data_path: str
+    # legacy_alignment: the released code paired the selection mask (no CLS
+    # position) with word ids that include CLS, and subtracted the number of
+    # query WORDPIECES from WORD ids. During training with noise the rationale
+    # predictor therefore received words several positions before the
+    # selected ones, often from another sentence (negative indices wrap around
+    # to the end of the document). Fixed by default; True restores it.
+    data_path: Optional[str] = None
     seed: Optional[int] = None
 
     def __post_init__(self):
@@ -98,7 +121,7 @@ class BaseNoisyRationaleExtractor(RationaleExtractor):
 
     def batch_tokenize(self, queries, rationales):
         text = self.get_examples(queries, rationales, self.tokenizer.sep_token)
-        return self.tokenizer(text = text, is_split_into_words = True, padding = True, return_tensors = 'pt').to(self.device)
+        return self.tokenizer(text = text, is_split_into_words = True, padding = True, truncation = True, max_length = self.max_length, return_tensors = 'pt').to(self.device)
 
     def extract_from_mask_with_replacement(self, batch, hard_mask):
         # Mask PAD tokens
@@ -110,12 +133,22 @@ class BaseNoisyRationaleExtractor(RationaleExtractor):
         rationales = []
         replacement_ratio_sum = 0
         for i, (evidence, replacement_probs, mask) in enumerate(zip(batch.examples.evidences, batch.replacement_probs, hard_mask)):
+            word_ids = batch.tokenized_examples.word_ids(i)
+            if self.legacy_alignment:
+                # as released: shifted by one token and by the query's extra wordpieces
+                pairs, offset = zip(word_ids, mask), batch.evidences_start_no_cls(i)
+            else:
+                # mask position j is token j + 1; the evidence starts after the
+                # query words and the [SEP] word (see datasets_ce.get_examples)
+                pairs, offset = zip(word_ids[1:], mask), len(batch.examples.queries[i]) + 1
             # Masked select
-            indices = [x for x, is_masked in zip(batch.tokenized_examples.word_ids(i), mask) if x is not None and is_masked]
+            indices = [x for x, is_masked in pairs if x is not None and is_masked]
+            if not self.legacy_alignment:
+                indices = [x for x in indices if x >= offset]
             # Unique Consecutive
             indices = [x for i, x in enumerate(indices) if i == 0 or x != indices[i - 1]]
             # Map to evidence indices
-            indices = [x - batch.evidences_start_no_cls(i) for x in indices]
+            indices = [x - offset for x in indices]
             # If no valid indices (selected tokens do not map to words such as
             # selecting only CLS/SEP/PAD tokens), select the first word
             if len(indices) == 0:
@@ -161,6 +194,8 @@ class RationaleExtractorFactory:
     device: str
     data_path: Optional[str] = None
     seed: Optional[int] = None
+    legacy_alignment: bool = False
+    legacy_selection: bool = False
 
     def create_extractor(self, inject_noise):
         if inject_noise:
@@ -168,9 +203,11 @@ class RationaleExtractorFactory:
                 tokenizer = self.tokenizer,
                 device = self.device,
                 data_path = self.data_path,
-                seed = self.seed
+                seed = self.seed,
+                legacy_alignment = self.legacy_alignment,
+                legacy_selection = self.legacy_selection
             )
-        return RationaleExtractor(tokenizer = self.tokenizer, device = self.device)
+        return RationaleExtractor(tokenizer = self.tokenizer, device = self.device, legacy_selection = self.legacy_selection)
 
 
 @dataclass
@@ -212,6 +249,16 @@ class TopkSelector:
 
 @dataclass
 class TopkSentenceSelector(TopkSelector):
+    # True: pick the k sentences uniformly at random (random-selection control)
+    random: bool = False
+    seed: Optional[int] = None
+    # True: map tokens to sentences and rank them exactly as released (word ids
+    # offset by a token position, cut-off sentences ranked first)
+    legacy: bool = False
+
+    def __post_init__(self):
+        self.generator = torch.Generator().manual_seed(self.seed if self.seed is not None else 0)
+
     def get_num_sentences(self, sentence_mask: list):
         # batch-first - select last sentence index (= num_sentences - 1) from each seq in a batch
         return [sent_mask[-1] + 1 for sent_mask in sentence_mask]
@@ -227,7 +274,13 @@ class TopkSentenceSelector(TopkSelector):
 
     def get_word_ids_from_batch(self, batch, i):
         word_ids = batch.tokenized_examples.word_ids(i)[batch.evidences_start_cls(i):]
-        return [id - batch.evidences_start_cls(i) if id is not None else -1 for id in word_ids]
+        # The released code subtracted the TOKEN position of the evidence from
+        # WORD ids, which shifts every token by (query wordpieces - query words
+        # + 1) words towards the previous sentence (negative ids wrap around to
+        # the last sentence). The evidence starts after the query words and
+        # the [SEP] word (see datasets_ce.get_examples).
+        offset = batch.evidences_start_cls(i) if self.legacy else len(batch.examples.queries[i]) + 1
+        return [id - offset if id is not None else -1 for id in word_ids]
 
     def map_to_tokens_from_batch(self, batch, i):
         return self.map_to_tokens(batch.sentence_mask[i], self.get_word_ids_from_batch(batch, i))
@@ -246,35 +299,46 @@ class TopkSentenceSelector(TopkSelector):
         return self.aggregate_to_sent_level(counts, sent_mask, num_sents, i)
 
     def map_to_evidence_indices(self, sent_indices, sent_mask, atts):
-        return torch.tensor([i for i in range(len(atts)) if torch.any(sent_indices == sent_mask[i])])
+        # long, so that an empty selection (only sentences cut off by
+        # max_length, possible with legacy ranking) is a valid index
+        return torch.tensor([i for i in range(len(atts)) if torch.any(sent_indices == sent_mask[i])], dtype = torch.long)
 
-    def __call__(self, batch, token_att) -> torch.Tensor:
+    def get_sentence_scores(self, batch, token_att, num_sents, i):
+        atts = self.get_atts_from_batch(token_att, batch, i)
+        sent_mask = self.map_to_tokens_from_batch(batch, i)
+        sent_atts = self.aggregate_atts_to_sent_level(atts, sent_mask, num_sents, i)
+        # Sentences cut off by max_length have no tokens and a NaN mean, which
+        # topk ranks first (released behaviour). They cannot be selected now,
+        # and k counts the visible sentences only.
+        visible = ~torch.isnan(sent_atts)
+        if self.random:
+            sent_atts = torch.rand(len(sent_atts), generator = self.generator)
+        if self.legacy:
+            return atts, sent_mask, sent_atts, len(sent_atts)
+        sent_atts[~visible] = float("-inf")
+        return atts, sent_mask, sent_atts, int(visible.sum())
+
+    def select(self, batch, token_att):
+        # returns the token mask and the indices of the selected sentences
         hard_mask = self.get_mask(token_att)
-        k = self.get_k_sentences(batch.sentence_mask)
         num_sents = self.get_num_sentences(batch.sentence_mask)
+        selected_sentences = []
         # batch-first
         for i in range(token_att.shape[0]):
-            atts = self.get_atts_from_batch(token_att, batch, i)
-            sent_mask = self.map_to_tokens_from_batch(batch, i)
-            sent_atts = self.aggregate_atts_to_sent_level(atts, sent_mask, num_sents, i)
-            _, sent_indices = sent_atts.topk(k = k[i], dim = -1)
+            atts, sent_mask, sent_atts, num_visible = self.get_sentence_scores(batch, token_att, num_sents, i)
+            k = max(1, min(num_visible, int(round(num_visible * self.sparsity))))
+            _, sent_indices = sent_atts.topk(k = k, dim = -1)
+            selected_sentences.append(sent_indices.tolist())
             evidence_indices = self.map_to_evidence_indices(sent_indices, sent_mask, atts)
             token_indices = self.map_to_token_indices(evidence_indices, batch, i)
             hard_mask[i, token_indices, :] = True
-        return hard_mask
+        return hard_mask, selected_sentences
+
+    def __call__(self, batch, token_att) -> torch.Tensor:
+        return self.select(batch, token_att)[0]
 
     def get_selected_sentences(self, batch, token_att):
-        selected_sentences = []
-        k = self.get_k_sentences(batch.sentence_mask)
-        num_sents = self.get_num_sentences(batch.sentence_mask)
-        # batch-first
-        for i in range(token_att.shape[0]):
-            atts = self.get_atts_from_batch(token_att, batch, i)
-            sent_mask = self.map_to_tokens_from_batch(batch, i)
-            sent_atts = self.aggregate_atts_to_sent_level(atts, sent_mask, num_sents, i)
-            _, sent_indices = sent_atts.topk(k = k[i], dim = -1)
-            selected_sentences.append(sent_indices.tolist())
-        return selected_sentences
+        return self.select(batch, token_att)[1]
 
     def get_selected_token_counts_by_sentences(self, batch, token_att):
         tcounts = []
@@ -300,9 +364,9 @@ class RationaleSelectorFactory:
     pad_token_id: int
     device: str
 
-    def create_selector(self, selection_method):
+    def create_selector(self, selection_method, legacy = False):
         if selection_method == "sentences":
-            return TopkSentenceSelector(self.sparsity, self.max_length, self.pad_token_id, self.device)
+            return TopkSentenceSelector(self.sparsity, self.max_length, self.pad_token_id, self.device, legacy = legacy)
         if selection_method == "words":
             return TopkSelector(self.sparsity, self.max_length, self.pad_token_id, self.device)
         raise ValueError("selection_method not one of ['sentences', 'words']")
