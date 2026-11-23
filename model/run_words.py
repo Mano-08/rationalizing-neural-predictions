@@ -2,6 +2,7 @@ import dataclasses
 import json
 import os
 import random
+import time
 from argparse import ArgumentParser
 
 import numpy as np
@@ -65,6 +66,13 @@ def parse_args():
     # through). 0 = as released: the generator never learns from the
     # predictor which of its selected words were useful
     parser.add_argument('--coupling_weight', type = float, default = 0.0)
+    # During training, swap this share of the selected tokens for randomly
+    # chosen unselected tokens of the same review before the rationale-based
+    # predictor reads them (a random vicinity of the selection, as in Liu et
+    # al., TACL 2025). 0 = off
+    parser.add_argument('--selection_perturbation', type = float, default = 0.0)
+    # Stop training after this many hours and evaluate the best checkpoint so far
+    parser.add_argument('--time_limit_hours', type = float, default = None)
     # Use only the first layers of the generator's encoder
     parser.add_argument('--generator_layers', type = int, default = None)
     # Rank tokens by attention averaged over this many tokens (odd number)
@@ -217,6 +225,10 @@ def main(args):
             selectable_fn = selectable_fn,
             coupling_weight = args.coupling_weight,
             evidence_noise = args.inject_noise and args.noise_target != 'rationale',
+            selection_perturbation = args.selection_perturbation,
+            perturbation_generator = torch.Generator().manual_seed(0 if args.seed is None else args.seed),
+            special_token_ids = (tokenizer.pad_token_id, tokenizer.sep_token_id, tokenizer.cls_token_id),
+            time_limit_hours = args.time_limit_hours,
         )
 
     if args.evaluate:
@@ -274,6 +286,10 @@ def train(
     selectable_fn,
     coupling_weight = 0.0,
     evidence_noise = False,
+    selection_perturbation = 0.0,
+    perturbation_generator = None,
+    special_token_ids = (),
+    time_limit_hours = None,
     ):
 
     with tqdm(total=num_epochs * len(train_loader)) as pb:
@@ -294,6 +310,8 @@ def train(
         global_step = 0
         metrics = []
         patience_left = patience
+        start_time = time.time()
+        out_of_time = False
 
         # training loop
         bb_model.train()
@@ -303,6 +321,17 @@ def train(
 
                 if patience_left == 0:
                     pb.write("Patience is 0, early stopping")
+                    break
+
+                if time_limit_hours is not None and time.time() - start_time > time_limit_hours * 3600:
+                    pb.write(f"Time limit of {time_limit_hours} h reached, stopping training")
+                    out_of_time = True
+                    metrics.append({"stopped_by_time_limit": True, "step": global_step})
+                    if not os.path.exists(os.path.join(checkpoint_dir, "bb_model.pt")):
+                        # stopped before the first validation: keep the current models
+                        bb_model_save(bb_model, checkpoint_dir)
+                        rp_model_save(rp_model, checkpoint_dir)
+                    metrics_save(metrics, checkpoint_dir)
                     break
 
                 # generate prediction and token probs of being in a rationale
@@ -328,6 +357,10 @@ def train(
                     input_ids = batch.reviews_tokenized.input_ids,
                     selectable = selectable
                 )
+
+                if selection_perturbation > 0:
+                    hard_mask = perturb_selection(hard_mask, batch.reviews_tokenized.input_ids, selection_perturbation,
+                                                  perturbation_generator, special_token_ids)
 
                 rationale, _, replace_ratio = rationale_extractor(
                     batch = batch,
@@ -526,8 +559,32 @@ def train(
                     bb_model.train()
                     rp_model.train()
 
-            if patience_left == 0:
+            if patience_left == 0 or out_of_time:
                 break
+
+
+def perturb_selection(hard_mask, input_ids, share, generator, special_token_ids):
+    # Swaps round(share * k) of the k selected word tokens of each review for
+    # unselected word tokens of the same review, chosen uniformly at random.
+    # The number of selected tokens stays the same; special tokens are never
+    # swapped in or out. Training only.
+    mask = hard_mask.squeeze(-1).clone()
+    # mask position j is token j + 1 (the selection leaves out [CLS])
+    ids = input_ids[:, 1:]
+    words = torch.ones_like(ids, dtype = torch.bool)
+    for token_id in special_token_ids:
+        words &= ids != token_id
+    for i in range(mask.shape[0]):
+        selected = (mask[i] & words[i]).nonzero().squeeze(-1)
+        free = (~mask[i] & words[i]).nonzero().squeeze(-1)
+        swaps = min(int(round(share * len(selected))), len(free))
+        if swaps == 0:
+            continue
+        drop = selected[torch.randperm(len(selected), generator = generator)[:swaps].to(selected.device)]
+        add = free[torch.randperm(len(free), generator = generator)[:swaps].to(free.device)]
+        mask[i, drop] = False
+        mask[i, add] = True
+    return mask.unsqueeze(-1)
 
 
 def evaluate(

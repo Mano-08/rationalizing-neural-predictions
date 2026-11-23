@@ -6,7 +6,69 @@ rationales; their Table 2), and our Limitations names both as open. This file
 lists the runs that add them, with the same models, seeds and protocol as the
 USR runs in the paper.
 
-## Status (2026-11-23): done
+## Round 2 (planned 2026-11-23): experiments 1, 2, 4 and 5
+
+**This replaces "No further runs are planned" below.** Four experiments chosen
+after the literature review; every setting was fixed before any run.
+
+| # | Experiment | Stage(s) | What it tests |
+| --- | --- | --- | --- |
+| 1 | Frozen generator that encodes the query with each sentence on its own (`--generator pairwise`) | `frozen_x` (MultiRC, FEVER) | whether the frozen generator fails on MultiRC/FEVER because it cannot relate a sentence to the query |
+| 2 | Random vicinity of the selection: 20% of the selected tokens swapped for other tokens of the review during training (Liu et al., TACL 2025) | `vicinal` (USR) | whether scrambling *which* tokens are selected breaks the encoding where NI does not |
+| 4 | Straight-through path from the predictor's loss to the generator, weight 1.0 | `ni_coupled`, `a2r_coupled` (USR) | whether NI steers the generator once a gradient reaches it (exposure below 1?) |
+| 5 | DR: predictor learning rate = selection rate x generator's = 4e-6 (Liu et al., 2023) | `dr` (USR) | freezing vs. the closest published remedy |
+| 5 | BM25 sentence selector, no training | done on the Mac: `results/bm25/` | MultiRC F1 51.3, FEVER F1 51.1 (every trained model: 17-39) |
+
+USR runs pair by seed with the existing `a2r_tail_seed*` and `ni_tail_seed*`
+runs (results_v8-v11): same batch (16), window (TAIL), single tokens and noise
+level (0.2); only the tested option differs. Tested on the Mac (tiny BERT, real
+data): every stage runs, the coupling passes gradient to the generator only
+when on, the perturbation swaps exactly 20% of the selected word tokens, the
+pairwise generator's sentence attentions reach the selector unchanged, and the
+new 9.5 h time limit of USR runs stops training cleanly.
+
+### Session 0b: check (about 40 minutes, first)
+
+Push the code to `ani` first. Then, in the main cell:
+
+```python
+STAGES = ["setup", "smoke_new"]
+SEED = 1
+BATCH = 16
+DATASET = "usr"
+TRUNCATION = "left"
+```
+
+and in a second cell: `DATASET = "multirc"; run("setup", "smoke_new")`.
+Expected: four USR smoke runs and one MultiRC smoke run, each ending with test
+metrics and no error. **Delete the second cell afterwards.**
+
+### Sessions R1-R12
+
+Change only these lines (GPU T4 x2, Internet on, Save Version -> Save & Run All).
+**USR sessions need `TRUNCATION = "left"`; MultiRC/FEVER sessions `TRUNCATION = "right"`.**
+
+| # | DATASET | TRUNCATION | SEED | STAGES | est. time | save as |
+| --- | --- | --- | --- | --- | --- | --- |
+| R1 | `"usr"` | `"left"` | 1 | `["setup", ["dr", "vicinal"], "probe", "pack"]` | 5-10.5 h | `results/results_v27` |
+| R2 | `"usr"` | `"left"` | 2 | `["setup", ["dr", "vicinal"], "probe", "pack"]` | 5-10.5 h | `results/results_v28` |
+| R3 | `"usr"` | `"left"` | 3 | `["setup", ["dr", "vicinal"], "probe", "pack"]` | 5-10.5 h | `results/results_v29` |
+| R4 | `"usr"` | `"left"` | 1 | `["setup", ["ni_coupled", "a2r_coupled"], "probe", "pack"]` | 5-10.5 h | `results/results_v30` |
+| R5 | `"usr"` | `"left"` | 2 | `["setup", ["ni_coupled", "a2r_coupled"], "probe", "pack"]` | 5-10.5 h | `results/results_v31` |
+| R6 | `"usr"` | `"left"` | 3 | `["setup", ["ni_coupled", "a2r_coupled"], "probe", "pack"]` | 5-10.5 h | `results/results_v32` |
+| R7 | `"multirc"` | `"right"` | 1 | `["setup", "frozen_x", "probe", "pack"]` | 2-3 h | `results/results_v33` |
+| R8 | `"multirc"` | `"right"` | 2 | `["setup", "frozen_x", "probe", "pack"]` | 2-3 h | `results/results_v34` |
+| R9 | `"multirc"` | `"right"` | 3 | `["setup", "frozen_x", "probe", "pack"]` | 2-3 h | `results/results_v35` |
+| R10 | `"fever"` | `"right"` | 1 | `["setup", "frozen_x", "probe", "pack"]` | 6-9 h | `results/results_v36` |
+| R11 | `"fever"` | `"right"` | 2 | `["setup", "frozen_x", "probe", "pack"]` | 6-9 h | `results/results_v37` |
+| R12 | `"fever"` | `"right"` | 3 | `["setup", "frozen_x", "probe", "pack"]` | 6-9 h | `results/results_v38` |
+
+`BATCH = 16` in all sessions. The sessions are independent: run them in any
+order and in parallel on different accounts, each account its owner's. The
+USR probe stage now runs only the `tail` and `tail_random` probes
+(`USR_PROBES` in `kaggle_run.py`). About 115 GPU hours in total.
+
+## Status (2026-11-23): round 1 done
 
 All 24 runs are in `results/results_v15` to `results_v26` and in the paper
 (Sec. 7.3, Table 3, App. I: Tables 13-14). Measured times differ from the
@@ -14,7 +76,7 @@ estimates in section 4: a fine-tuned FEVER epoch took 3.6-4.3 h (not
 1.8-2.5 h), so all nine fine-tuned FEVER runs stopped at the 9.5 h limit
 after 2.2-2.6 epochs (checkpoint: epoch 2 in seven runs, epoch 1 in two).
 Analysis scripts: `~/noise_injection_cache/ce_analysis/` (`analyze.py`,
-`make_tables.py`). No further runs are planned.
+`make_tables.py`).
 
 ## Changes from the first version of this file (2026-11-17)
 

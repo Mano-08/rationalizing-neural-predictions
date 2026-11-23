@@ -14,7 +14,7 @@ from transformers import AutoTokenizer, logging
 
 from models import (BlackBoxPredictor, RationaleExtractor,
                     RationaleExtractorFactory, RationalePredictor)
-from models_ce import (RationaleExtractor, RationaleExtractorFactory,
+from models_ce import (PairwiseSentenceGenerator, RationaleExtractor, RationaleExtractorFactory,
                        RationaleSelectorFactory, TopkSentenceSelector)
 from datasets_ce import DataLoaderFactory
 
@@ -78,6 +78,11 @@ def parse_args():
     parser.add_argument('--random_selection', action = "store_true")
     # Stop training after this many hours and evaluate the best checkpoint so far
     parser.add_argument('--time_limit_hours', type = float, default = None)
+    # Generator: "joint" encodes query and document together (BERT-A2R);
+    # "pairwise" is a frozen BERT that encodes the query with each sentence
+    # on its own and trains only its two linear layers
+    parser.add_argument('--generator', type = str, default = "joint", choices = ["joint", "pairwise"])
+    parser.add_argument('--pair_max_length', type = int, default = 128)
     # Use the first examples only, for a fast debugging loop
     parser.add_argument('--train_subset', type = int, default = None)
     parser.add_argument('--valid_subset', type = int, default = None)
@@ -100,13 +105,19 @@ def main(args):
 
     tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast = True)
 
-    bb_model = BlackBoxPredictor(num_labels = 2, model = args.model, freeze_encoder = args.freeze_encoder_bb).to(args.device)
-    print(f"Black Box Predictor: {get_num_params(bb_model)} parameters")
+    rationale_selector = RationaleSelectorFactory(args.sparsity, args.max_length, tokenizer.pad_token_id, args.device).create_selector(args.selection_method, args.legacy_selection)
+
+    if args.generator == "pairwise":
+        if args.selection_method != "sentences":
+            raise ValueError("--generator pairwise requires --selection_method sentences")
+        bb_model = PairwiseSentenceGenerator(num_labels = 2, model = args.model, tokenizer = tokenizer, selector = rationale_selector,
+                                             max_pair_length = args.pair_max_length).to(args.device)
+    else:
+        bb_model = BlackBoxPredictor(num_labels = 2, model = args.model, freeze_encoder = args.freeze_encoder_bb).to(args.device)
+    print(f"Black Box Predictor: {get_num_params(bb_model)} parameters, {sum(p.numel() for p in bb_model.parameters() if p.requires_grad)} trainable")
 
     rp_model = RationalePredictor(num_labels = 2, model = args.model, freeze_encoder = args.freeze_encoder_rp).to(args.device)
     print(f"Rationale Predictor: {get_num_params(rp_model)} parameters")
-
-    rationale_selector = RationaleSelectorFactory(args.sparsity, args.max_length, tokenizer.pad_token_id, args.device).create_selector(args.selection_method, args.legacy_selection)
 
     rationale_extractor = RationaleExtractorFactory(tokenizer, args.device, args.data_path, args.seed, args.legacy_alignment, args.legacy_selection).create_extractor(args.inject_noise)
 
@@ -248,7 +259,7 @@ def train(
 
                 # generate prediction and token probs of being in a rationale
                 batch.tokenized_examples = batch.tokenized_examples.to(device)
-                att_pred, token_att = bb_model(**batch.tokenized_examples)
+                att_pred, token_att = generate(bb_model, batch)
 
                 with torch.no_grad():
                     hard_mask = rationale_selector(batch, token_att)
@@ -296,7 +307,7 @@ def train(
                         for batch in valid_loader:
                             # generate prediction and token probs of being in a rationale
                             batch.tokenized_examples = batch.tokenized_examples.to(device)
-                            att_pred, token_att = bb_model(**batch.tokenized_examples)
+                            att_pred, token_att = generate(bb_model, batch)
 
                             with torch.no_grad():
                                 hard_mask = rationale_selector(batch, token_att)
@@ -437,7 +448,7 @@ def evaluate(
         for batch in tqdm(test_loader):
             batch.tokenized_examples = batch.tokenized_examples.to(device)
             # generate prediction and token probs of being in a rationale
-            _, token_att = bb_model(**batch.tokenized_examples)
+            _, token_att = generate(bb_model, batch)
             # mask based on probs
             if random_selection:
                 hard_mask, selected_sentences = sentence_selector.select(batch, token_att)
@@ -539,6 +550,13 @@ def set_seed(seed):
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+
+
+def generate(bb_model, batch):
+    # class probabilities of the attention-based predictor and token attention
+    if isinstance(bb_model, PairwiseSentenceGenerator):
+        return bb_model(batch)
+    return bb_model(**batch.tokenized_examples)
 
 
 def get_num_params(model):

@@ -370,3 +370,88 @@ class RationaleSelectorFactory:
         if selection_method == "words":
             return TopkSelector(self.sparsity, self.max_length, self.pad_token_id, self.device)
         raise ValueError("selection_method not one of ['sentences', 'words']")
+
+class PairwiseSentenceGenerator(torch.nn.Module):
+    """Frozen generator that scores every sentence together with the query.
+
+    A frozen BERT encodes each (query, sentence) pair on its own; a linear
+    layer scores the pair's [CLS] state, the scores are normalized into an
+    attention over the sentences, and the attention-based predictor classifies
+    from the attention-weighted [CLS] states. As in the frozen generator
+    (BlackBoxPredictor with freeze_encoder), only these two linear layers are
+    trained, and the loss is the same.
+
+    The outputs match BlackBoxPredictor: class probabilities and a token
+    attention over the joint input ([CLS] query [SEP] document [SEP], without
+    [CLS]) in which every token of a sentence carries that sentence's
+    attention. Sentence selection, extraction and the rationale-based
+    predictor therefore work unchanged, and the candidate sentences are those
+    with a token inside the joint input, as for every other model.
+    """
+
+    def __init__(self, num_labels, model, tokenizer, selector, max_pair_length = 128, chunk_size = 256):
+        super().__init__()
+        from transformers import AutoModel
+        self.num_labels = num_labels
+        self.encoder = AutoModel.from_pretrained(model)
+        for param in self.encoder.parameters():
+            param.requires_grad = False
+        hidden_size, dropout = self.encoder.config.hidden_size, self.encoder.config.hidden_dropout_prob
+        self.token_predictor = torch.nn.Sequential(torch.nn.Dropout(dropout), torch.nn.Linear(hidden_size, 1))
+        self.predictor = torch.nn.Sequential(torch.nn.Dropout(dropout), torch.nn.Linear(hidden_size, num_labels))
+        self.tokenizer = tokenizer
+        # maps the tokens of the joint input to sentences (TopkSentenceSelector)
+        self.selector = selector
+        self.max_pair_length = max_pair_length
+        self.chunk_size = chunk_size
+
+    def encode_pairs(self, queries, sentences, device):
+        states = []
+        for start in range(0, len(queries), self.chunk_size):
+            encoded = self.tokenizer(text = queries[start:start + self.chunk_size], text_pair = sentences[start:start + self.chunk_size],
+                                     is_split_into_words = True, truncation = True, max_length = self.max_pair_length,
+                                     padding = True, return_tensors = 'pt').to(device)
+            with torch.no_grad(), torch.autocast(device_type = device.type, dtype = torch.float16, enabled = device.type == 'cuda'):
+                states.append(self.encoder(**encoded)[0][:, 0, :].float())
+        return torch.cat(states)
+
+    def forward(self, batch):
+        device = self.token_predictor[1].weight.device
+        input_ids = batch.tokenized_examples.input_ids
+        token_att = torch.zeros(input_ids.shape[0], input_ids.shape[1] - 1, 1, device = device)
+        queries, sentences, spans, sentence_ids = [], [], [], []
+        for i in range(input_ids.shape[0]):
+            # sentence of every token after the query, -1 for special tokens
+            ids = self.selector.map_to_tokens_from_batch(batch, i).to(device)
+            visible = sorted(set(ids[ids >= 0].tolist()))
+            words = {}
+            for word, sentence in zip(batch.examples.evidences[i], batch.sentence_mask[i]):
+                words.setdefault(sentence, []).append(word)
+            spans.append((len(queries), len(queries) + len(visible)))
+            for sentence in visible:
+                queries.append(list(batch.examples.queries[i]))
+                sentences.append(words[sentence])
+            sentence_ids.append((ids, visible))
+        hidden_size = self.encoder.config.hidden_size
+        states = self.encode_pairs(queries, sentences, device) if queries else torch.zeros(0, hidden_size, device = device)
+        scores = self.token_predictor(states).squeeze(-1)
+        att_preds = []
+        for i, ((start, end), (ids, visible)) in enumerate(zip(spans, sentence_ids)):
+            if end == start:
+                # no sentence inside the joint input
+                pooled = torch.zeros(hidden_size, device = device)
+            else:
+                att = torch.softmax(scores[start:end], -1)
+                pooled = (att.unsqueeze(-1) * states[start:end]).sum(0)
+                by_sentence = torch.zeros(max(visible) + 1, device = device)
+                by_sentence[visible] = att.detach()
+                values = torch.where(ids >= 0, by_sentence[ids.clamp(min = 0)], torch.zeros_like(by_sentence[:1]))
+                offset = batch.evidences_start_no_cls(i)
+                token_att[i, offset:offset + len(ids), 0] = values
+            att_preds.append(torch.softmax(self.predictor(pooled), -1))
+        return torch.stack(att_preds), token_att
+
+    def get_loss(self, att_pred, hard_pred, labels, proximity):
+        # the loss of BlackBoxPredictor, cross-entropy on probabilities as released
+        from models import js_div
+        return torch.nn.functional.cross_entropy(att_pred, labels) + proximity * js_div(att_pred, hard_pred)

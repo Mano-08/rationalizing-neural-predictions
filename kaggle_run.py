@@ -80,8 +80,18 @@ EXPOSURE = 0.9         # exposure the controller of frozen_closed holds
 TRUNCATION = "right"   # reviews longer than 512 tokens: "right" keeps the beginning, "left" keeps the end
 WINDOW = 1             # rank tokens by attention averaged over this many tokens (odd); 5 selects phrases
 DATASET = "usr"        # "usr" (USR Movie Review), "multirc" or "fever"
-TIME_LIMIT_HOURS = 9.5 # MultiRC/FEVER: stop training after this long and evaluate the best checkpoint,
-                       # so that a run fits into a 12-hour Kaggle session
+TIME_LIMIT_HOURS = 9.5 # stop training after this long and evaluate the best checkpoint, so that a run
+                       # fits into a 12-hour Kaggle session (USR runs since round 2, MultiRC/FEVER always)
+
+# Round 2 (2026-11-23), fixed before any run: DR sets the predictor's learning
+# rate to the selection rate times the generator's (Liu et al., 2023): 0.2 x 2e-5;
+# vicinal swaps 20% of the selected tokens; coupling passes the predictor's loss
+# to the generator at full weight
+DR_RP_LR = 4e-6
+PERTURBATION = 0.2
+COUPLING = 1.0
+# USR probes run by the probe stage (None = all of PROBES)
+USR_PROBES = ["tail", "tail_random"]
 
 # MultiRC/FEVER: noise level of Storek et al. (2023) for the dataset; epochs,
 # patience and one validation per epoch as in our USR runs (run_words.py)
@@ -103,7 +113,8 @@ DEVICES = None
 STATUS_EVERY = 300
 
 # stages that are one independent training run and may run in parallel
-PARALLEL_STAGES = ["ni", "released", "a2r", "exp", "cos", "closed", "full", "judge", "frozen", "frozen_ni", "frozen_en", "frozen_closed"]
+PARALLEL_STAGES = ["ni", "released", "a2r", "exp", "cos", "closed", "full", "judge", "frozen", "frozen_ni", "frozen_en", "frozen_closed",
+                   "dr", "vicinal", "ni_coupled", "a2r_coupled", "frozen_x"]
 
 # probe stage: name -> options of run_words.py --evaluate
 PROBES = {
@@ -229,7 +240,8 @@ def train_run(name, *args):
     print(f"== {name}")
     # the faithfulness judge is used as soon as it has been trained
     judge = ["--faithfulness_model", judge_path()] if os.path.exists(judge_path()) else []
-    python("run_words.py", "--train", "--evaluate", *common(), *selection(), *judge, "--save_path", save_path, *args)
+    python("run_words.py", "--train", "--evaluate", *common(), *selection(), *judge, "--time_limit_hours", TIME_LIMIT_HOURS,
+           "--save_path", save_path, *args)
 
 
 def ce_setup():
@@ -404,6 +416,58 @@ def stage_frozen_closed():
               "--noise_p", P, "--noise_p_min", 0.0, "--noise_p_max", 1.0)
 
 
+def stage_dr():
+    # DR (Liu et al., 2023): the predictor learns more slowly than the generator
+    not_for_ce("dr")
+    train_run("dr", "--rp_lr", DR_RP_LR)
+
+
+def stage_vicinal():
+    # a random vicinity of the selection: PERTURBATION of the selected tokens
+    # are swapped for other tokens of the review during training
+    not_for_ce("vicinal")
+    train_run("vicinal", "--selection_perturbation", PERTURBATION)
+
+
+def stage_ni_coupled():
+    # NI with a path from the predictor's loss to the generator (straight-through)
+    not_for_ce("ni_coupled")
+    need(stats_path("train_replacement_probs.pkl"), "setup")
+    train_run("ni_coupled", "--inject_noise", "--noise_p", P, "--coupling_weight", COUPLING)
+
+
+def stage_a2r_coupled():
+    # the same path without noise
+    not_for_ce("a2r_coupled")
+    need(stats_path("train_replacement_probs.pkl"), "setup")
+    train_run("a2r_coupled", "--inject_noise", "--noise_p", 0, "--coupling_weight", COUPLING)
+
+
+def stage_frozen_x():
+    # frozen generator that encodes the query with each sentence on its own
+    if not is_ce():
+        raise RuntimeError("Stage 'frozen_x' is for MultiRC/FEVER only")
+    ce_train_run("frozen_x", "--generator", "pairwise", "--freeze_encoder_bb")
+
+
+def stage_smoke_new():
+    # each round-2 option on small subsets for one epoch (minutes), to catch
+    # errors before the long runs; "smoke" runs are ignored by probe and pack
+    subsets = ["--train_subset", 400, "--valid_subset", 100, "--test_subset", 100, "--num_epochs", 1]
+    if is_ce():
+        need(os.path.join(data_path(), "word_statistics", "train_replacement_probs.pkl"), "setup")
+        python("run_ce.py", "--train", "--evaluate", *ce_common(), *subsets, "--patience", 2, "--validations_per_epoch", 1,
+               "--generator", "pairwise", "--freeze_encoder_bb", "--save_path", os.path.join(OUT, f"smoke_{DATASET}_frozen_x"))
+        return
+    need(stats_path("train_replacement_probs.pkl"), "setup")
+    for name, options in [("dr", ["--rp_lr", DR_RP_LR]), ("vicinal", ["--selection_perturbation", PERTURBATION]),
+                          ("ni_coupled", ["--inject_noise", "--noise_p", P, "--coupling_weight", COUPLING]),
+                          ("a2r_coupled", ["--inject_noise", "--noise_p", 0, "--coupling_weight", COUPLING])]:
+        print(f"== smoke {name}", flush = True)
+        python("run_words.py", "--train", "--evaluate", *common(), *selection(), *subsets, *options,
+               "--save_path", os.path.join(OUT, f"smoke_{name}"))
+
+
 def training_options(run_path):
     # options of the training run that evaluation has to repeat
     config_path = os.path.join(run_path, "config.json")
@@ -448,6 +512,18 @@ def probe_table():
         print(f"{row[0]:40s} " + " ".join(f"{value:5.1f}" for value in row[1:7]) + f" {row[7]:5.2f} {row[8]:5.1f}")
 
 
+def ce_generator_options(run_path):
+    # the evaluation must build the generator the run was trained with
+    config_path = os.path.join(run_path, "config.json")
+    if not os.path.exists(config_path):
+        return []
+    with open(config_path) as f:
+        config = json.load(f)
+    if config.get("generator", "joint") == "pairwise":
+        return ["--generator", "pairwise", "--pair_max_length", config.get("pair_max_length", 128)]
+    return []
+
+
 def ce_probe():
     # random-selection control for every run of this dataset; needs the
     # checkpoints, so it runs in the session that trained the models
@@ -464,7 +540,7 @@ def ce_probe():
                 link = os.path.join(target, "checkpoints")
                 if not os.path.lexists(link):
                     os.symlink(os.path.join(run_path, "checkpoints"), link)
-                python("run_ce.py", "--evaluate", *ce_common(), "--save_path", target, *options)
+                python("run_ce.py", "--evaluate", *ce_common(), *ce_generator_options(run_path), "--save_path", target, *options)
         for result_path in [os.path.join(run_path, "results.json")] + sorted(glob.glob(os.path.join(OUT, "probe", f"{name}__*", "results.json"))):
             if not os.path.exists(result_path):
                 continue
@@ -488,6 +564,8 @@ def stage_probe():
     jobs = []
     for name, run_path in sorted(runs.items()):
         for probe, options in PROBES.items():
+            if USR_PROBES is not None and probe not in USR_PROBES:
+                continue
             target = os.path.join(OUT, "probe", f"{name}__{probe}")
             if os.path.exists(os.path.join(target, "results.json")):
                 continue
