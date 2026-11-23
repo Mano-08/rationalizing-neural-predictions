@@ -6,25 +6,35 @@ rationales; their Table 2), and our Limitations names both as open. This file
 lists the runs that add them, with the same models, seeds and protocol as the
 USR runs in the paper.
 
+## Status (2026-11-23): done
+
+All 24 runs are in `results/results_v15` to `results_v26` and in the paper
+(Sec. 7.3, Table 3, App. I: Tables 13-14). Measured times differ from the
+estimates in section 4: a fine-tuned FEVER epoch took 3.6-4.3 h (not
+1.8-2.5 h), so all nine fine-tuned FEVER runs stopped at the 9.5 h limit
+after 2.2-2.6 epochs (checkpoint: epoch 2 in seven runs, epoch 1 in two).
+Analysis scripts: `~/noise_injection_cache/ce_analysis/` (`analyze.py`,
+`make_tables.py`). No further runs are planned.
+
 ## Changes from the first version of this file (2026-11-17)
 
-| | first version | now | why |
-| --- | --- | --- | --- |
-| validation | twice per epoch (released `run_ce.py`) | once per epoch | as in our USR runs (`run_words.py`), so "patience 2" means 2 epochs as in Table 11 |
-| MultiRC patience | none (Storek et al.) | 2 | Table 11 of the paper: one protocol for every run ("Epochs, patience: 5, 2") |
-| `released` | released selection + released NI alignment | released NI alignment only | in the paper, NI_released differs from NI only in the training-time alignment defect (App. A item 3); selection fixes apply to every model, like the evaluation fixes on USR |
-| probe `__fixed_eval` | re-scored `released` with fixed selection | removed | no longer needed: `released` is evaluated like every other model |
+|                      | first version                              | now                        | why                                                                                                                                                                          |
+| -------------------- | ------------------------------------------ | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| validation           | twice per epoch (released `run_ce.py`)     | once per epoch             | as in our USR runs (`run_words.py`), so "patience 2" means 2 epochs as in Table 11                                                                                           |
+| MultiRC patience     | none (Storek et al.)                       | 2                          | Table 11 of the paper: one protocol for every run ("Epochs, patience: 5, 2")                                                                                                 |
+| `released`           | released selection + released NI alignment | released NI alignment only | in the paper, NI_released differs from NI only in the training-time alignment defect (App. A item 3); selection fixes apply to every model, like the evaluation fixes on USR |
+| probe `__fixed_eval` | re-scored `released` with fixed selection  | removed                    | no longer needed: `released` is evaluated like every other model                                                                                                             |
 
 Session list, stages and results folders are unchanged.
 
 ## 1. What is run
 
-| Stage | Name in the paper | Generator | Noise |
-| --- | --- | --- | --- |
-| `a2r` | A2R | fine-tuned | none |
-| `ni` | A2R+NI (as described) | fine-tuned | NI, alignment fixed |
-| `released` | A2R+NI_released | fine-tuned | NI with the alignment defect (`--legacy_alignment`, training only) |
-| `frozen` | FG | frozen encoder | none |
+| Stage      | Name in the paper     | Generator      | Noise                                                              |
+| ---------- | --------------------- | -------------- | ------------------------------------------------------------------ |
+| `a2r`      | A2R                   | fine-tuned     | none                                                               |
+| `ni`       | A2R+NI (as described) | fine-tuned     | NI, alignment fixed                                                |
+| `released` | A2R+NI_released       | fine-tuned     | NI with the alignment defect (`--legacy_alignment`, training only) |
+| `frozen`   | FG                    | frozen encoder | none                                                               |
 
 2 datasets x 4 models x seeds 1-3 = **24 training runs**, plus `probe`:
 each trained predictor evaluated on k randomly chosen sentences
@@ -36,12 +46,12 @@ batch 16, at most 5 epochs, one noise-free validation per epoch, patience 2,
 checkpoint of the last epoch in which both validation losses improved,
 lambda = 0.1, 20% selection, 512 wordpieces. Per dataset (Storek et al.):
 
-| | MultiRC | FEVER |
-| --- | --- | --- |
-| train / valid / test | 24,029 / 3,214 / 4,848 | 97,957 / 6,122 / 6,111 |
-| noise level p | 0.3 | 0.05 |
-| selection unit | sentence: top 20% of sentences by mean attention | same |
-| test docs over 512 wordpieces | 8.1% | 16.8% |
+|                               | MultiRC                                          | FEVER                  |
+| ----------------------------- | ------------------------------------------------ | ---------------------- |
+| train / valid / test          | 24,029 / 3,214 / 4,848                           | 97,957 / 6,122 / 6,111 |
+| noise level p                 | 0.3                                              | 0.05                   |
+| selection unit                | sentence: top 20% of sentences by mean attention | same                   |
+| test docs over 512 wordpieces | 8.1%                                             | 16.8%                  |
 
 **Not applicable:** phrase selection (the unit is already a sentence), so the
 method here is FG, not FG+PS; HEAD/TAIL (the query comes first, documents
@@ -55,14 +65,14 @@ numbers were not produced by the released evaluation, so the paired
 comparisons among our own runs are the main result and the published rows are
 shown for reference only:
 
-| Dataset | Model | Acc | P | R | F1 |
-| --- | --- | --- | --- | --- | --- |
-| MultiRC | BERT-A2R | 66.1 (1.9) | 18.5 (1.6) | 21.9 (2.2) | 19.3 (1.8) |
+| Dataset | Model       | Acc        | P          | R          | F1         |
+| ------- | ----------- | ---------- | ---------- | ---------- | ---------- |
+| MultiRC | BERT-A2R    | 66.1 (1.9) | 18.5 (1.6) | 21.9 (2.2) | 19.3 (1.8) |
 | MultiRC | BERT-A2R+NI | 66.4 (0.8) | 22.6 (1.2) | 26.9 (1.8) | 23.8 (1.4) |
-| FEVER | BERT-A2R | 82.1 (3.2) | 36.3 (0.6) | 44.0 (0.3) | 36.7 (0.5) |
-| FEVER | BERT-A2R+NI | 78.2 (1.9) | 39.0 (2.5) | 47.2 (2.9) | 39.5 (2.5) |
+| FEVER   | BERT-A2R    | 82.1 (3.2) | 36.3 (0.6) | 44.0 (0.3) | 36.7 (0.5) |
+| FEVER   | BERT-A2R+NI | 78.2 (1.9) | 39.0 (2.5) | 47.2 (2.9) | 39.5 (2.5) |
 
-## 2. Code changes (uncommitted on `final_review`; must be on `ani`)
+## 2. Code changes (commit bc97ac6 on `final_review`, pushed to `ani` as 2e5528e)
 
 The released MultiRC/FEVER code (`model/run_ce.py`, `models_ce.py`,
 `datasets_ce.py`) had never been run in this project. Defects found and
@@ -117,20 +127,20 @@ smoke run ends with "Sentence-level Micro-Averaged ...".
 
 ### Sessions 1-12 (`BATCH = 16` in all)
 
-| # | DATASET | SEED | STAGES | est. time | save as |
-| --- | --- | --- | --- | --- | --- |
-| 1 | `"multirc"` | 1 | `["setup", ["a2r", "ni"], "probe", "pack"]` | 3-6.5 h | `results/results_v15` |
-| 2 | `"multirc"` | 1 | `["setup", ["frozen", "released"], "probe", "pack"]` | 3-6.5 h | `results/results_v16` |
-| 3 | `"multirc"` | 2 | `["setup", ["a2r", "ni"], "probe", "pack"]` | 3-6.5 h | `results/results_v17` |
-| 4 | `"multirc"` | 2 | `["setup", ["frozen", "released"], "probe", "pack"]` | 3-6.5 h | `results/results_v18` |
-| 5 | `"multirc"` | 3 | `["setup", ["a2r", "ni"], "probe", "pack"]` | 3-6.5 h | `results/results_v19` |
-| 6 | `"multirc"` | 3 | `["setup", ["frozen", "released"], "probe", "pack"]` | 3-6.5 h | `results/results_v20` |
-| 7 | `"fever"` | 1 | `["setup", ["a2r", "ni"], "probe", "pack"]` | 5-10.5 h | `results/results_v21` |
-| 8 | `"fever"` | 1 | `["setup", ["frozen", "released"], "probe", "pack"]` | 5-10.5 h | `results/results_v22` |
-| 9 | `"fever"` | 2 | `["setup", ["a2r", "ni"], "probe", "pack"]` | 5-10.5 h | `results/results_v23` |
-| 10 | `"fever"` | 2 | `["setup", ["frozen", "released"], "probe", "pack"]` | 5-10.5 h | `results/results_v24` |
-| 11 | `"fever"` | 3 | `["setup", ["a2r", "ni"], "probe", "pack"]` | 5-10.5 h | `results/results_v25` |
-| 12 | `"fever"` | 3 | `["setup", ["frozen", "released"], "probe", "pack"]` | 5-10.5 h | `results/results_v26` |
+| #   | DATASET     | SEED | STAGES                                               | est. time | save as               |
+| --- | ----------- | ---- | ---------------------------------------------------- | --------- | --------------------- |
+| 1   | `"multirc"` | 1    | `["setup", ["a2r", "ni"], "probe", "pack"]`          | 3-6.5 h   | `results/results_v15` |
+| 2   | `"multirc"` | 1    | `["setup", ["frozen", "released"], "probe", "pack"]` | 3-6.5 h   | `results/results_v16` |
+| 3   | `"multirc"` | 2    | `["setup", ["a2r", "ni"], "probe", "pack"]`          | 3-6.5 h   | `results/results_v17` |
+| 4   | `"multirc"` | 2    | `["setup", ["frozen", "released"], "probe", "pack"]` | 3-6.5 h   | `results/results_v18` |
+| 5   | `"multirc"` | 3    | `["setup", ["a2r", "ni"], "probe", "pack"]`          | 3-6.5 h   | `results/results_v19` |
+| 6   | `"multirc"` | 3    | `["setup", ["frozen", "released"], "probe", "pack"]` | 3-6.5 h   | `results/results_v20` |
+| 7   | `"fever"`   | 1    | `["setup", ["a2r", "ni"], "probe", "pack"]`          | 5-10.5 h  | `results/results_v21` |
+| 8   | `"fever"`   | 1    | `["setup", ["frozen", "released"], "probe", "pack"]` | 5-10.5 h  | `results/results_v22` |
+| 9   | `"fever"`   | 2    | `["setup", ["a2r", "ni"], "probe", "pack"]`          | 5-10.5 h  | `results/results_v23` |
+| 10  | `"fever"`   | 2    | `["setup", ["frozen", "released"], "probe", "pack"]` | 5-10.5 h  | `results/results_v24` |
+| 11  | `"fever"`   | 3    | `["setup", ["a2r", "ni"], "probe", "pack"]`          | 5-10.5 h  | `results/results_v25` |
+| 12  | `"fever"`   | 3    | `["setup", ["frozen", "released"], "probe", "pack"]` | 5-10.5 h  | `results/results_v26` |
 
 Session 1, for example:
 
@@ -147,7 +157,12 @@ DATASET = "multirc"
 - Essential: `a2r`, `ni`, `frozen`. `released` is optional, but it shares the
   GPU-parallel session with `frozen`, so dropping it saves no session time.
 
-## 4. Time and budget (estimates; check them after session 1)
+## 4. Time and budget
+
+**Measured, session 1 (MultiRC seed 1, `a2r` + `ni` in parallel):** about
+56 min per epoch; both runs stopped by patience after epoch 3 (best
+checkpoint: epoch 1); training 2.8 h, test evaluation 6 min, each random
+probe 7 min; session about 3.3 h. The estimates below hold.
 
 From Storek et al.'s per-epoch times (USR 110 min, MultiRC 70, FEVER 150) and
 our USR epochs on T4 (fine-tuned 1.3-1.8 h, frozen 0.7-0.9 h):

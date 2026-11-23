@@ -56,7 +56,7 @@
 \maketitle
 
 \begin{abstract}
-Unsupervised selective rationalization trains a generator to extract a rationale and a predictor to classify from the extracted rationale. Noise injection \citep{storek-etal-2023-unsupervised} replaces unimportant rationale words with random words during training and makes fine-tuned BERT generators more plausible. On USR Movie Review, it does not steer the generator: no gradient carries the noise back to the generator's choices, its selections are hit by noise as often as random ones, and every fine-tuned generator we trained selects more stopwords and punctuation than a random selection. Its benefit varies strongly between seeds, with or without a defect in the released code, and rationales are plausible only in runs where the selections no longer encode the label. Freezing the generator's encoder achieves this without noise; its rationales are more plausible on average than with noise injection and far more stable. Averaging attention over five-token windows to select phrases adds about three F1 points to every generator. The published numbers use the end of long reviews, the released code the beginning; on the end of each review, the two changes raise token F1 from 33.3 to 34.2, IOU-F1 from 38.4 to 50.9, and accuracy from 87.9 to 91.8.
+Unsupervised selective rationalization trains a generator to extract a rationale and a predictor to classify from it. Noise injection \citep{storek-etal-2023-unsupervised} replaces unimportant rationale words with random words during training and makes fine-tuned BERT generators more plausible. On USR Movie Review, it does not steer the generator: no gradient carries the noise back to the generator's choices, and its selections are hit by noise as often as random ones and contain more stopwords and punctuation. Its benefit varies strongly between seeds, with or without a defect in the released code, and rationales are plausible only where the selections no longer encode the label. Freezing the generator's encoder achieves this without noise; its rationales are more plausible on average than with noise injection and far more stable. Selecting phrases by averaging attention over five-token windows adds about three F1 points. The published numbers use the end of long reviews, the released code the beginning; on the end of each review, the two changes raise token F1 from 33.3 to 34.2, IOU-F1 from 38.4 to 50.9, and accuracy from 87.9 to 91.8. On MultiRC and FEVER, where rationales answer a query, freezing lowers F1 and noise injection helps inconsistently.
 \end{abstract}
 
 % ===========================================================================
@@ -73,7 +73,7 @@ Noise injection still makes a fine-tuned generator more plausible, by 2.4 to 8.1
 
 Finally, the published USR numbers correspond to an evaluation window that keeps the \emph{end} of each review (\TAIL), whereas the released code keeps the beginning (\HEAD; \S\ref{sec:protocol}). Because 85\% of the test reviews exceed BERT's 512-token limit, this choice alone changes F1 by 1.7 to 3.6 points.
 
-The analysis points to the capacity of the generator rather than to the noise. We therefore keep the generator's encoder at its pretrained weights, so that only two linear layers are trained (2,307 parameters): the layer that scores each token to form the generator's attention and the classifier of the attention-based predictor. We also rank tokens by their attention averaged over a five-token window, so that the fixed number of tokens a rationale may contain is spent on phrases instead of isolated tokens (\S\ref{sec:method}). Neither change adds a training objective. Against our reproductions, the frozen generator is at least as plausible as NI as described in all three seeds and more plausible than the fine-tuned generator without noise. It is also more plausible than NI as released on average and varies far less between seeds. Phrase selection adds about three F1 points to every generator. In \TAIL, the window of the published numbers, the result improves on the best published model in IOU-F1 (50.9 vs.\ 38.4) and accuracy (91.8 vs.\ 87.9) and in token F1 by a margin that is not significant (34.2 vs.\ 33.3), and an epoch of its training takes about half as long as with a fine-tuned generator (\S\ref{sec:results}).
+The analysis points to the capacity of the generator rather than to the noise. We therefore keep the generator's encoder at its pretrained weights, so that only two linear layers are trained (2,307 parameters): the layer that scores each token to form the generator's attention and the classifier of the attention-based predictor. We also rank tokens by their attention averaged over a five-token window, so that the fixed number of tokens a rationale may contain is spent on phrases instead of isolated tokens (\S\ref{sec:method}). Against our reproductions, the frozen generator is at least as plausible as NI as described in all three seeds and more plausible than the fine-tuned generator without noise. It is also more plausible than NI as released on average and varies far less between seeds. Phrase selection adds about three F1 points to every generator. In \TAIL, the window of the published numbers, the result improves on the best published model in IOU-F1 (50.9 vs.\ 38.4) and accuracy (91.8 vs.\ 87.9) and in token F1 by a margin that is not significant (34.2 vs.\ 33.3), and an epoch of its training takes about half as long as with a fine-tuned generator (\S\ref{sec:results}, Table~\ref{tab:hyper}).
 
 Our contributions are:
 \begin{itemize}
@@ -81,6 +81,7 @@ Our contributions are:
   \item an analysis showing that noise injection does not teach the generator of BERT-A2R to avoid the words it replaces, with four diagnostics: how often noise hits the selected words, how many of them are stopwords and punctuation, how well these words alone predict the label, and how well the predictor classifies random selections;
   \item a reproducibility audit of the USR benchmark: a test that identifies the evaluation window from published precision and recall alone, and fixes for four defects in the released code, one of which changes the F1 of NI by $-4$ to $+10$ points;
   \item a frozen generator, which without any noise is more plausible on average than noise injection, as described or as released, and far more stable across seeds; and phrase selection, which adds about three F1 points to any generator; together they improve on the published state of the art on USR Movie Review under the published protocol;
+  \item results on MultiRC and FEVER, where noise injection does not help consistently and freezing lowers plausibility;
   \item negative results for adjusting the noise level during training and for noise that does reach the generator (evidence noise).
 \end{itemize}
 We release our code and all diagnostics.\footnote{\repolink}
@@ -185,7 +186,7 @@ is high for words with low \tfidf{} $t_i$ in document $d$, where $t_{\max}$ is t
 
 Since only Eq.~\ref{eq:la} reaches the generator (\S\ref{sec:background}), the rationale-based predictor affects it only through $\sg[\hat{y}^r]$, a two-class distribution for the whole document weighted by $\lambda = 0.1$. When noise replaces a selected word, the generator can therefore learn at most that $\hat{y}^r$ changed, not which word was replaced or that selecting it was a mistake. The mechanism NI relies on, making implausible selections costly for the generator, has no path in this architecture.
 
-This gives a simple test. If NI punished the generator for selecting the words it tends to replace, the generator would learn to stop selecting them. We measure this with the \emph{exposure} of a rationale: the average replacement weight $r_i$ (Eq.~\ref{eq:r}) of its words. Because $r$ averages 1 over a review, a random selection has an exposure of about 1; a selection that avoids the words NI tends to replace has a lower exposure, and one that prefers them a higher one. In every run with NI, the exposure stays at about 1.0 throughout training (1.02 at the end of training in both seeds of the frozen generator of \S\ref{sec:method} with NI, and 1.02--1.08 in the three seeds of the fine-tuned generator trained in \TAIL). The generator never learns to avoid the noise: its words are replaced at least as often as randomly chosen ones.
+This gives a simple test. If NI punished the generator for selecting the words it tends to replace, the generator would learn to stop selecting them. We measure this with the \emph{exposure} of a rationale: the average replacement weight $r_i$ (Eq.~\ref{eq:r}) of its words. Because $r$ averages 1 over a review, a random selection has an exposure of about 1; a selection that avoids the words NI tends to replace has a lower exposure, and one that prefers them a higher one. In every run with NI, the exposure stays at about 1.0 throughout training (1.02 at the end of training in both seeds of the frozen generator of \S\ref{sec:method} with NI, and 1.02--1.08 in the three seeds of the fine-tuned generator trained in \TAIL; 1.00 in every run on MultiRC and FEVER, App.~\ref{app:sentence}). The generator never learns to avoid the noise: its words are replaced at least as often as randomly chosen ones.
 
 \subsection{Fine-tuned generators select stopwords and punctuation}
 \label{sec:degeneration}
@@ -235,7 +236,7 @@ Why does the generator not prefer the words that express the sentiment? Its only
 
 \subsection{Frozen generator (FG)}
 
-We keep the generator's encoder at its pretrained BERT-base weights and train only the scorer $w$ and the classifier $W$ of the attention-based predictor ($769 + 1{,}538 = 2{,}307$ parameters). The rationale-based predictor is fine-tuned as before, and the losses (Eqs.~\ref{eq:la}--\ref{eq:lr}) are unchanged. With frozen states, the scorer is a linear probe \citep{hewitt-liang-2019-designing}: it ranks tokens along one direction of a fixed representation space and has far less freedom to encode the label than a fine-tuned encoder. Empirically, it prefers content words: on average, only 41\% (\HEAD, Table~\ref{tab:degeneration}) and 42\% (\TAIL) of its single-token selections are stopwords and punctuation, fewer than in a random selection (51\%) or in human rationales (46\%). \citet{storek-etal-2023-unsupervised} report this configuration as their fixed-generator baseline; with matched evaluation, it is more plausible on average than our reproductions of their best model, the fine-tuned generator with NI, with or without the defect of the released code (\S\ref{sec:results}).
+We keep the generator's encoder at its pretrained BERT-base weights and train only the scorer $w$ and the classifier $W$ of the attention-based predictor ($769 + 1{,}538 = 2{,}307$ parameters). The rationale-based predictor is fine-tuned as before, and the losses (Eqs.~\ref{eq:la}--\ref{eq:lr}) are unchanged. With frozen states, the scorer is a linear probe \citep{hewitt-liang-2019-designing}: it ranks tokens along one direction of a fixed representation space and has far less freedom to encode the label than a fine-tuned encoder. Empirically, it prefers content words: on average, only 41\% (\HEAD, Table~\ref{tab:degeneration}) and 42\% (\TAIL) of its single-token selections are stopwords and punctuation, fewer than in a random selection (51\%) or in human rationales (46\%). \citet{storek-etal-2023-unsupervised} report this configuration as their fixed-generator baseline (\S\ref{sec:results}).
 
 \subsection{Phrase selection (PS)}
 
@@ -323,42 +324,36 @@ In the \HEAD{} window (Table~\ref{tab:degeneration}), FG+PS outperforms every fi
 \subsection{Ablations}
 \label{sec:ablations}
 
+\paragraph{Window and selection.}
+The two factors add up (Table~\ref{tab:ablation} in App.~\ref{app:window}): \TAIL{} adds 3.3--3.6 F1 points and phrase selection 2.8--3.1. Spans grow from 1.9 words ($w = 1$) to 5.9 ($w = 5$) and 9.1 ($w = 9$). IOU-F1 grows with the window, from 30.5 to 50.9 and 60.4, while F1 peaks at $w = 5$ (34.2) and drops at $w = 9$ (33.3). With a 0.1 threshold, IOU-F1 credits every generated span whose intersection over union with a human span is at least 0.1, so it rewards contiguity as such; we therefore treat token F1 as the primary plausibility metric. Accuracy is also higher with phrases (91.8 vs.\ 90.9), although part of this gap may come from evaluating, with single tokens, a predictor that was trained on phrases; accuracy with single tokens also varies more between seeds (standard deviation 1.1 vs.\ 0.4). The gain of \TAIL{} over \HEAD{} is a protocol choice, not a method gain. It differs between models (1.7 F1 points for A2R, 3.0 to 3.6 for the others) and can be as large as the published gain of the fine-tuned generator with NI over the fixed generator (3.3 F1), so the window must be fixed before comparing numbers.
+
+\paragraph{Noise and faithfulness.}
+Neither NI nor evidence noise improves FG+PS (App.~\ref{app:noise}); NI changes its F1 and IOU-F1 by less than 0.1 points, as \S\ref{sec:credit} predicts. For an independent classifier, the rationale of FG+PS alone retains 88\% of the gain in probability over an empty input, although the fine-tuned generator with NI is more comprehensive in its best seed (App.~\ref{app:faithfulness}).
+
+\subsection{MultiRC and FEVER}
+\label{sec:sentence}
+
 \begin{table}[t]
 \centering
 \small
-\setlength{\tabcolsep}{4pt}
-\begin{tabular}{@{}llccccc@{}}
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{@{}lcccc@{}}
 \toprule
-Window & Selection & Acc & P & R & F1 & IOU \\
+& \multicolumn{2}{c}{MultiRC} & \multicolumn{2}{c}{FEVER} \\
+\cmidrule(lr){2-3} \cmidrule(l){4-5}
+Model & Acc & F1 & Acc & F1 \\
 \midrule
-\HEAD & $w = 1$ & 87.1 & 19.0 & 52.0 & 27.8 & 27.0 \\
-\HEAD & $w = 5$ & 88.4 & 21.1 & 57.8 & 31.0 & 46.8 \\
-\TAIL & $w = 1$ & 90.9 & 23.0 & 49.8 & 31.5 & 30.5 \\
-\TAIL & $w = 5$ & \textbf{91.8} & \textbf{25.0} & \textbf{54.2} & \textbf{34.2} & 50.9 \\
-\TAIL & $w = 9$ & 91.1 & 24.3 & 52.6 & 33.3 & \textbf{60.4} \\
+A2R & 65.9\textsubscript{0.4} & 23.9\textsubscript{0.4} & 84.8\textsubscript{1.3} & 37.6\textsubscript{1.9} \\
+\ + NI & 66.1\textsubscript{0.3} & 22.0\textsubscript{2.0} & 84.2\textsubscript{0.6} & 39.0\textsubscript{0.4} \\
+\ + NI\textsubscript{released} & 66.2\textsubscript{0.4} & 20.6\textsubscript{0.9} & 84.1\textsubscript{1.5} & 36.5\textsubscript{4.3} \\
+FG & 65.3\textsubscript{1.3} & 17.1\textsubscript{1.1} & 69.8\textsubscript{4.1} & 28.4\textsubscript{3.0} \\
 \bottomrule
 \end{tabular}
-\caption{The FG+PS model evaluated under each window and selection (mean over three seeds; standard deviation at most 0.2 for F1, 0.5 for IOU-F1 and 1.1 for accuracy; bold: best in \TAIL). The window and the selection add up; IOU-F1 keeps growing with $w$ while F1 peaks at $w = 5$.}
-\label{tab:ablation}
+\caption{MultiRC and FEVER: accuracy and sentence-level F1 (mean over three seeds, subscripts: standard deviation; more in Table~\ref{tab:sentence-full}).}
+\label{tab:sentence}
 \end{table}
 
-\paragraph{Window and selection.}
-The two factors add up (Table~\ref{tab:ablation}): \TAIL{} adds 3.3--3.6 F1 points and phrase selection 2.8--3.1. Spans grow from 1.9 words ($w = 1$) to 5.9 ($w = 5$) and 9.1 ($w = 9$). IOU-F1 grows with the window, from 30.5 to 50.9 and 60.4, while F1 peaks at $w = 5$ (34.2) and drops at $w = 9$ (33.3). With a 0.1 threshold, IOU-F1 credits every generated span whose intersection over union with a human span is at least 0.1, so it rewards contiguity as such; we therefore treat token F1 as the primary plausibility metric. Accuracy is also higher with phrases (91.8 vs.\ 90.9), although part of this gap may come from evaluating, with single tokens, a predictor that was trained on phrases; accuracy with single tokens also varies more between seeds (standard deviation 1.1 vs.\ 0.4).
-
-\paragraph{Window versus model.}
-The gain of \TAIL{} over \HEAD{} is a protocol choice, not a method gain. It differs between models (1.7 F1 points for A2R, 3.0 to 3.6 for the others) and can be as large as the published gain of the fine-tuned generator with NI over the fixed generator (3.3 F1), so the window must be fixed before comparing numbers.
-
-\subsection{Does noise help a frozen generator?}
-
-Neither form of noise improves plausibility (Table~\ref{tab:noise} in App.~\ref{app:noise}). Paired by seed, NI changes the F1 and IOU-F1 of FG+PS by less than 0.1 points, as \S\ref{sec:credit} predicts. Noise on the evidence does reach the generator: its attention exposure falls to 0.83, and its single-token selections contain fewer stopwords and punctuation. Yet its F1 changes by $+0.3$ and $-0.4$ points, and its accuracy falls by 0.80 and 0.95 points.
-
-\subsection{Faithfulness}
-
-With its own rationale-based predictor, the comprehensiveness of FG+PS lies in the published range (.034 vs.\ .02--.04 on the sigmoid scale), and its sufficiency is closer to zero ($-$.007 vs.\ $-$.01 to $-$.04). For an independent classifier trained on full reviews, the rationale of FG+PS alone retains 88\% of the gain in probability over an empty input. In its best seed, the fine-tuned generator with NI is more comprehensive (.335 vs.\ .175): it selects what a fine-tuned classifier relies on, including stopwords and punctuation (App.~\ref{app:faithfulness}).
-
-\subsection{Cost}
-
-Freezing removes all but 2,307 of the generator's 109.5M trainable parameters and halves the number of parameters that receive gradients in BERT-A2R. On a T4 GPU, an epoch takes 0.7--0.9 hours with the frozen generator and 1.3--1.8 hours with a fine-tuned one (run times: Table~\ref{tab:hyper}).
+MultiRC \citep{khashabi-etal-2018-looking} and FEVER \citep{thorne-etal-2018-fever} are ERASER tasks whose rationales are sentences that answer a query (a question with a candidate answer, or a claim). The rationale is the 20\% of the document's sentences with the highest mean attention, and both predictors also read the query. We train A2R, +NI ($p = 0.3$ and $0.05$, as published), +NI\textsubscript{released} and FG with seeds 1 to 3, after fixing four defects of the released code (App.~\ref{app:sentence}). The frozen generator does not transfer (Table~\ref{tab:sentence}): it is less plausible than A2R in every seed, on average by 6.9 F1 points on MultiRC, where it does no better than random sentences (17.5), and by 9.3 on FEVER, where its predictor is also 14.9 points less accurate. Paired by seed, NI changes F1 by $-3.7$ to $+0.9$ points on MultiRC and by $+0.1$ to $+2.9$ on FEVER, against published gains of 4.5 and 2.8. No predictor shows the encoding seen on USR: on random sentences, fine-tuned predictors lose at most 0.9 accuracy points on MultiRC and 2.3--6.7 on FEVER and put at most 81\% of the documents in one class; they rely mostly on the query, which on FEVER alone reveals much of the label \citep{schuster-etal-2019-towards}. As on USR, the published numbers do not come from the released evaluation (App.~\ref{app:sentence}).
 
 % ===========================================================================
 \section{Discussion}
@@ -366,7 +361,7 @@ Freezing removes all but 2,307 of the generator's 109.5M trainable parameters an
 % ===========================================================================
 
 \paragraph{What noise injection does.}
-NI cannot tell the generator which of its choices were implausible (\S\ref{sec:credit}), yet it made our fine-tuned generators more plausible in all four pairs of runs that share a seed, by 3.3 F1 points in \HEAD{} and by 2.4 to 8.1 in \TAIL. To see why, we give each trained predictor a random selection of the same size. A predictor that reads the content of the selected words still classifies many of these reviews correctly; a predictor that reads an encoding finds no signal and assigns almost every review to one class. The predictor of A2R does the latter, with more than 98\% of the reviews in one class in all three seeds: it reads the label from which tokens are selected, not from their content. Noise on the selected words can break this encoding, close to the explanation of \citet{storek-etal-2023-unsupervised}, but it does not always do so. For A2R+NI, the encoding is broken only in seed 3 (its predictor is 71.1\% accurate on random selections); for NI as released, whose predictor is trained on the word before each selected token, only in seeds 2 and 3 (67.9\%). Across the nine fine-tuned runs trained in \TAIL, plausibility tracks whether the encoding survives: F1 is 17.2 to 23.3 in the six runs whose predictor assigns more than 90\% of random selections to one class, and 27.1 to 32.5 in the other three. The frozen generator prevents the encoding in every seed (FG+PS: 73.4--74.6\% accurate on random selections), and NI then has no measurable effect (Table~\ref{tab:noise}).
+NI cannot tell the generator which of its choices were implausible (\S\ref{sec:credit}), yet it made our fine-tuned generators more plausible in all four pairs of runs that share a seed, by 3.3 F1 points in \HEAD{} and by 2.4 to 8.1 in \TAIL. To see why, we give each trained predictor a random selection of the same size. A predictor that reads the content of the selected words still classifies many of these reviews correctly; a predictor that reads an encoding finds no signal and assigns almost every review to one class. The predictor of A2R does the latter, with more than 98\% of the reviews in one class in all three seeds: it reads the label from which tokens are selected, not from their content. Noise on the selected words can break this encoding, close to the explanation of \citet{storek-etal-2023-unsupervised}, but it does not always do so. For A2R+NI, the encoding is broken only in seed 3 (its predictor is 71.1\% accurate on random selections); for NI as released, whose predictor is trained on the word before each selected token, only in seeds 2 and 3 (67.9\%). Across the nine fine-tuned runs trained in \TAIL, plausibility tracks whether the encoding survives: F1 is 17.2 to 23.3 in the six runs whose predictor assigns more than 90\% of random selections to one class, and 27.1 to 32.5 in the other three. The frozen generator prevents the encoding in every seed (FG+PS: 73.4--74.6\% accurate on random selections), and NI then has no measurable effect (Table~\ref{tab:noise}). Freezing helped only where fine-tuned predictors read such an encoding: on MultiRC and FEVER, where none does (\S\ref{sec:sentence}), the frozen generator's loss $\mathcal{L}_a$ is lowest after the first epoch, unlike on USR, so the random-selection test also indicates when to freeze.
 
 \paragraph{Recommendations for evaluation.}
 We recommend reporting the truncation window, the plausibility of a random selection of the same size, the share of stopwords and punctuation in the selection, and the predictor's accuracy on random selections; the ratio $R/P$ is a cheap check that two tables use the same window and selection rate.
@@ -375,7 +370,7 @@ We recommend reporting the truncation window, the plausibility of a random selec
 \section{Conclusion}
 % ===========================================================================
 
-Noise injection was proposed to keep powerful generators from producing implausible rationales. In BERT-A2R, it does not do so by steering the generator: the noise has no token-level path to it, and the selected words are at least as exposed to noise as random ones. Its benefit varies strongly between seeds, with or without a defect of the released code that shows the predictor the word before each selected token, and the rationales are plausible only when the selection no longer encodes the label. Freezing the generator's encoder prevents this encoding in every seed without noise; its rationales are more plausible on average than with noise injection, as described or as released, and vary far less. Phrase selection adds about three F1 points to any generator; together, the two improve on the published state of the art. That state of the art was measured on the end of each review, a choice that can change F1 as much as the published gain of the best model over the frozen generator. We hope these results shift attention from perturbing the generator's training to limiting what a generator can encode in its choice of tokens.
+Noise injection was proposed to keep powerful generators from producing implausible rationales. In BERT-A2R, it does not do so by steering the generator: the noise has no token-level path to it, and the selected words are at least as exposed to noise as random ones. Its benefit varies strongly between seeds, with or without a defect of the released code that shows the predictor the word before each selected token, and the rationales are plausible only when the selection no longer encodes the label. Freezing the generator's encoder prevents this encoding in every seed without noise; its rationales are more plausible on average than with noise injection, as described or as released, and vary far less. Phrase selection adds about three F1 points to any generator; together, the two improve on the published state of the art. That state of the art was measured on the end of each review, a choice that can change F1 as much as the published gain of the best model over the frozen generator. On MultiRC and FEVER, where no predictor shows such an encoding, freezing lowers plausibility and noise injection does not help consistently. We hope these results shift attention from perturbing the generator's training to detecting and limiting what a generator encodes in its choice of tokens.
 
 % ===========================================================================
 \section*{Limitations}
@@ -383,9 +378,9 @@ Noise injection was proposed to keep powerful generators from producing implausi
 
 \begin{itemize}
   \setlength\itemsep{1pt}
-  \item \textbf{Scope.} We evaluate on a single benchmark of English movie reviews with one encoder, BERT-base; whether pretrained states localize the words that express the label as well in other domains, languages and encoders is untested, and tasks with sentence-level rationales such as MultiRC and FEVER remain open.
-  \item \textbf{Seeds.} Our main model and the fine-tuned models trained in \TAIL{} are averaged over three seeds, the noise variants over two, and the runs trained in \HEAD{} and the independent classifiers are single runs (the classifier's training was not exactly repeatable across sessions); differences below one point, such as the effect of evidence noise or the F1 margin over the best published model, are within seed variation.
-  \item \textbf{Reproduction.} Our fine-tuned reproductions vary far more between seeds than the published runs and fall short of them on average, with or without the alignment defect of the released code (App.~\ref{app:defects}): F1 19.5 to 31.4 (mean 24.5) as described and 23.3 to 32.5 (mean 27.6) as released, against 33.3 with a published standard deviation of 0.8. The released code cannot have produced the published numbers as is: it crashes before computing the word statistics, lacks a file that training with noise requires, and keeps the beginning of each review. The published runs therefore used a setup we could not recover, including how the replacement probabilities were computed and in which window the models were trained; they also report five seeds to our three, select the checkpoint with the lowest validation loss rather than the last one in which both validation losses improved, and ran on different hardware.
+  \item \textbf{Scope.} We evaluate on English data with one encoder, BERT-base: token-level rationales on USR Movie Review, and sentence-level rationales on MultiRC and FEVER, where the frozen generator is less plausible than a fine-tuned one (\S\ref{sec:sentence}). Whether pretrained states localize the words that express the label as well in other domains, languages and encoders is untested. On FEVER, the fine-tuned runs reached our training limit of 9.5 hours during their third epoch, and seven of the nine were still improving; longer training could change their results.
+  \item \textbf{Seeds.} Our main model, the fine-tuned models trained in \TAIL{} and all models on MultiRC and FEVER are averaged over three seeds, the noise variants over two, and the runs trained in \HEAD{} and the independent classifiers are single runs (the classifier's training was not exactly repeatable across sessions); differences below one point, such as the effect of evidence noise or the F1 margin over the best published model, are within seed variation.
+  \item \textbf{Reproduction.} Our fine-tuned reproductions vary far more between seeds than the published runs and fall short of them on average, with or without the alignment defect of the released code (App.~\ref{app:defects}): F1 19.5 to 31.4 (mean 24.5) as described and 23.3 to 32.5 (mean 27.6) as released, against 33.3 with a published standard deviation of 0.8. The released code cannot have produced the published numbers as is: it crashes before computing the word statistics, lacks a file that training with noise requires, and keeps the beginning of each review. The published runs therefore used a setup we could not recover, including how the replacement probabilities were computed and in which window the models were trained; they also report five seeds to our three, select the checkpoint with the lowest validation loss rather than the last one in which both validation losses improved, and ran on different hardware. On MultiRC and FEVER, the published ratio $R/P$ differs from that of every evaluation we ran (App.~\ref{app:sentence}).
   \item \textbf{Test-set diagnostics.} USR has no annotated development set, so the diagnostic experiments that informed the window size and noise level used a subset of the annotated test reviews; to limit the effect of this choice, we report every window we tried.
   \item \textbf{Truncation and budget.} Because of BERT's 512-token limit, the windows lose 46\% (\HEAD) and 32\% (\TAIL) of the human rationales; long-document encoders would remove this confound. The selection budget is fixed at 20\% of the tokens, while the number of words that express the label varies between reviews.
   \item \textbf{Plausibility.} We measure plausibility as agreement with human annotations, which are themselves inconsistent between reviews \citep{storek-etal-2023-unsupervised}; we did not run a human evaluation.
@@ -412,7 +407,7 @@ We found four defects in the released implementation of \citet{storek-etal-2023-
   \item \textbf{Alignment.} BERT adds a \texttt{[CLS]} token at the start of every input. The generator's selection leaves it out, so its first entry is the first token of the review, but the list that maps tokens to words still starts with \texttt{[CLS]}. When noise was injected, the released code lined up the two without removing \texttt{[CLS]}, so each selected token was matched to the word one position earlier: the rationale-based predictor received the word \emph{before} each selected token. For example, if the generator selects \emph{bad} and \emph{good} in ``the plot was bad but the story was good'', the predictor is trained on \emph{was} and \emph{was}. This affects training only; at validation and test time, the predictor receives the selected tokens. With the same seed, the defect changed the F1 of NI from 19.6 to 24.7 in \HEAD{} (seed 1, Table~\ref{tab:degeneration}) and, in \TAIL, from 19.5, 22.5 and 31.4 to 23.3, 32.5 and 27.1 in seeds 1 to 3 (Table~\ref{tab:paired-released}). We call NI with the fix \emph{NI as described} (+NI) and NI with the defect \emph{NI as released} (+NI\textsubscript{released}).
   \item \textbf{Faithfulness.} Comprehensiveness and sufficiency applied a sigmoid to values that were already probabilities, which maps every probability into $[0.5, 0.73]$. We report both scales (Table~\ref{tab:faithfulness}).
 \end{enumerate}
-The pinned tokenizer of the released code truncates long reviews from the right, i.e.\ it keeps the beginning (\HEAD).
+The pinned tokenizer of the released code truncates long reviews from the right, i.e.\ it keeps the beginning (\HEAD). App.~\ref{app:sentence} lists further defects in the code for MultiRC and FEVER.
 
 Two deviations from Eqs.~\ref{eq:la}--\ref{eq:lr} remain in our code, as in the released code, and affect all models alike. The cross-entropy is applied to the predicted probabilities as if they were logits. The closeness term is $\frac{1}{2}\big[\mathrm{KL}(M \,\|\, \hat{y}^a) + \mathrm{KL}(M \,\|\, \hat{y}^r)\big]$ with $M = (\hat{y}^a + \hat{y}^r)/2$, which differs from the Jensen--Shannon divergence in the direction of the KL terms, and it is summed over the batch while the cross-entropy is averaged; with batch size 16, its effective weight is therefore 1.6 per review rather than $\lambda = 0.1$.
 
@@ -555,6 +550,27 @@ Tuned gen.\ + NI & 24.4 & 52.7 & 2.16 \\
 \label{tab:rp}
 \end{table}
 
+Table~\ref{tab:ablation} evaluates the FG+PS model under each window and selection (\S\ref{sec:ablations}); its rows with $w = 1$ and $w = 5$ also appear in Tables~\ref{tab:degeneration} and~\ref{tab:main}.
+
+\begin{table}[h]
+\centering
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}llccccc@{}}
+\toprule
+Window & Selection & Acc & P & R & F1 & IOU \\
+\midrule
+\HEAD & $w = 1$ & 87.1 & 19.0 & 52.0 & 27.8 & 27.0 \\
+\HEAD & $w = 5$ & 88.4 & 21.1 & 57.8 & 31.0 & 46.8 \\
+\TAIL & $w = 1$ & 90.9 & 23.0 & 49.8 & 31.5 & 30.5 \\
+\TAIL & $w = 5$ & \textbf{91.8} & \textbf{25.0} & \textbf{54.2} & \textbf{34.2} & 50.9 \\
+\TAIL & $w = 9$ & 91.1 & 24.3 & 52.6 & 33.3 & \textbf{60.4} \\
+\bottomrule
+\end{tabular}
+\caption{The FG+PS model evaluated under each window and selection (mean over three seeds; standard deviation at most 0.2 for F1, 0.5 for IOU-F1 and 1.1 for accuracy; bold: best in \TAIL). The window and the selection add up; IOU-F1 keeps growing with $w$ while F1 peaks at $w = 5$.}
+\label{tab:ablation}
+\end{table}
+
 % ===========================================================================
 \section{Diagnostic Experiments on Cached States}
 \label{app:diagnostics}
@@ -636,25 +652,25 @@ Selection rate $k$ & 20\% \\
 Closeness $\lambda$ & 0.1 (effective 1.6; App.~\ref{app:defects}) \\
 Maximum length & 512 wordpieces \\
 Window $w$ & 5 \\
-Noise level & NI: $p = 0.2$; EN: $p = 0.3$ \\
+Noise level & NI: $p = 0.2$ (USR), 0.3 (MultiRC), 0.05 (FEVER); EN: $p = 0.3$ \\
 Trainable parameters & generator: 2,307 (FG) or 109.5M (fine-tuned); rationale-based predictor: 109.5M \\
 Independent classifier & \texttt{bert-base-uncased} on full reviews in \TAIL, same optimizer, batch size, epochs and patience; 94.0\% and 93.7\% test accuracy (two instances) \\
 Hardware & one NVIDIA T4 (16 GB) per run \\
-Time per run & FG: 3.5--4.6 h (0.7--0.9 h per epoch); fine-tuned: 4.2--8.2 h (1.3--1.8 h per epoch) \\
+Time per run & USR: FG 3.5--4.6 h (0.7--0.9 h per epoch), fine-tuned 4.2--8.2 h (1.3--1.8 h per epoch); MultiRC and FEVER: App.~\ref{app:sentence} \\
 \bottomrule
 \end{tabular}
 \caption{Hyperparameters and compute.}
 \label{tab:hyper}
 \end{table}
 
-Table~\ref{tab:hyper} lists our settings. Training is deterministic given the seed: re-running FG+PS with seed 2 in another session reproduced every training loss and every per-review result. All rationalization models share this code path, so we take two models trained with the same seed to differ only by their configuration. We compare such pairs with a paired bootstrap over the 2,000 test reviews (10,000 resamples) and report 95\% confidence intervals. The independent classifier is a BERT-base fine-tuned on the training reviews in \TAIL{} with the same optimizer, batch size and early stopping (seed 3). Unlike FG+PS, its training was not exactly repeatable across sessions: the two instances we trained reach 94.0\% and 93.7\% test accuracy. Training and evaluation ran on Kaggle notebooks with two T4 GPUs, one run per GPU. The runs reported in this paper took about 120 GPU hours in total. We use BERT (Apache 2.0), the USR Movie Review benchmark (MIT), ERASER Movie Reviews (Apache 2.0), the IMDb reviews of \citet{maas-etal-2011-learning} (no license known) and the released code of \citet{storek-etal-2023-unsupervised} (MIT), on which our code builds; the dataset and model licenses are as listed by \citet{storek-etal-2023-unsupervised}. We use all of them for research purposes consistent with their release. The TextAttack IMDb model \citep{morris-etal-2020-textattack} has no license on its model card; the TextAttack library is released under the MIT license.
+Table~\ref{tab:hyper} lists our settings. Training is deterministic given the seed: re-running FG+PS with seed 2 in another session reproduced every training loss and every per-review result. All rationalization models on USR share this code path, so we take two models trained with the same seed to differ only by their configuration (MultiRC and FEVER: App.~\ref{app:sentence}). We compare such pairs with a paired bootstrap over the 2,000 test reviews (10,000 resamples) and report 95\% confidence intervals. The independent classifier is a BERT-base fine-tuned on the training reviews in \TAIL{} with the same optimizer, batch size and early stopping (seed 3). Unlike FG+PS, its training was not exactly repeatable across sessions: the two instances we trained reach 94.0\% and 93.7\% test accuracy. Training and evaluation ran on Kaggle notebooks with two T4 GPUs, one run per GPU. The runs reported in this paper took about 120 GPU hours on USR and 146 on MultiRC and FEVER. We use BERT (Apache 2.0), the USR Movie Review benchmark (MIT), the ERASER versions of Movie Reviews, MultiRC and FEVER (Apache 2.0), the IMDb reviews of \citet{maas-etal-2011-learning} (no license known) and the released code of \citet{storek-etal-2023-unsupervised} (MIT), on which our code builds; the dataset and model licenses are as listed by \citet{storek-etal-2023-unsupervised}. We use all of them for research purposes consistent with their release. The TextAttack IMDb model \citep{morris-etal-2020-textattack} has no license on its model card; the TextAttack library is released under the MIT license.
 
 % ===========================================================================
 \section{How the Reported Quantities Are Computed}
 \label{app:definitions}
 % ===========================================================================
 
-All quantities are computed by the code we release, on the 2,000 test reviews (on 1,000 of them in App.~\ref{app:diagnostics}). Tables report means over seeds with sample standard deviations; differences are computed from unrounded values.
+All quantities are computed by the code we release, on the 2,000 test reviews (on 1,000 of them in App.~\ref{app:diagnostics}); App.~\ref{app:sentence} describes MultiRC and FEVER. Tables report means over seeds with sample standard deviations; differences are computed from unrounded values.
 
 \paragraph{Data.} Words are the tokens of the dataset files and wordpieces those of the \texttt{bert-base-uncased} tokenizer. A review exceeds the limit if not all of its words fit into 512 wordpieces, \texttt{[CLS]} and \texttt{[SEP]} included. Human-rationale statistics (\S\ref{sec:setup}) count all annotated words of the test reviews, and spans are the annotated word ranges.
 
@@ -719,5 +735,101 @@ FG + PS & .175 & .045 & .35 & .88 \\
 \end{table}
 
 With the rationale-based predictor (Table~\ref{tab:faithfulness}, top), the comprehensiveness of FG+PS lies in the published range (.034 vs.\ .02--.04 on the sigmoid scale), and its sufficiency is closer to zero ($-$.007 vs.\ $-$.01 to $-$.04). Negative sufficiency, i.e.\ more confidence on the rationale than on the full review, is expected from a predictor trained only on rationales and makes these scores hard to compare across models. The independent classifier (bottom) is not trained on rationales. Keeping only the rationale of FG+PS lowers the classifier's probability for the class it predicts by .045 on average, and the rationale alone retains 88\% of the gain in this probability over an empty input (on the 97\% of the reviews where there is a gain). Removing the rationale lowers the probability by .175, or 35\% of that gain. Over selection rates from 1\% to 50\%, the AOPC is .135 for comprehensiveness and .089 for sufficiency. Our reproduction of the fine-tuned generator with NI in its best seed (seed 3), scored by a second classifier trained with the same settings and seed (93.7\% accuracy), is twice as comprehensive (.335; AOPC .228) and slightly more sufficient (.029; normalized .90). Only its AOPC sufficiency is worse (.117), because its smallest selections are less sufficient. In this seed, the fine-tuned generator selects what a fine-tuned classifier relies on, including the stopwords and punctuation (63\% of its single-token selections) that make its rationales less plausible.
+
+% ===========================================================================
+\section{MultiRC and FEVER}
+\label{app:sentence}
+% ===========================================================================
+
+\paragraph{Data.} We use the ERASER versions of MultiRC and FEVER \citep{deyoung-etal-2020-eraser} with the splits of \citet{storek-etal-2023-unsupervised}: 24,029, 3,214 and 4,848 examples for training, validation and test on MultiRC, and 97,957, 6,122 and 6,111 on FEVER. Each example pairs a query with a document whose annotated sentences form the human rationale. The positive class (a correct answer, a supported claim) holds 42.8\% of the MultiRC and 49.6\% of the FEVER test examples.
+
+\paragraph{Input and selection.} The input consists of \texttt{[CLS]}, the query, \texttt{[SEP]}, the document and \texttt{[SEP]}, truncated on the right to 512 wordpieces, which shortens about 8\% (MultiRC) and 17\% (FEVER) of the test inputs. A sentence's score is the mean attention of its wordpieces inside the window, and the rationale consists of the $\max(1, \operatorname{round}(0.2\,n))$ highest-scoring of the $n$ sentences with a wordpiece inside the window: on average 2.84 (MultiRC) and 1.91 (FEVER) sentences per test document, against 2.33 and 1.38 annotated ones. The rationale-based predictor reads the query and the selected sentences in document order. Precision, recall and F1 are micro-averaged over sentences; annotated sentences outside the window count as missed. Since every model selects the same number of sentences, $R/P = S/G$ is the same in all our evaluations: 1.221 on MultiRC and 1.384 on FEVER. The released code computes $k$ from all sentences of a document, so it selects at least as many sentences and its ratio is at least as high. The published rows give 1.18--1.19 and 1.21 (Table~\ref{tab:sentence-full}), so, as on USR (App.~\ref{app:window}), they do not come from the released evaluation.
+
+\paragraph{Noise.} NI replaces words of the selected sentences as on USR (\S\ref{sec:background}), with $p = 0.3$ (MultiRC) and $p = 0.05$ (FEVER), the levels that \citet{storek-etal-2023-unsupervised} found best, and replacement weights from the word statistics of each training set. In every epoch of every run with NI, the share of replaced words divided by $p$ is 0.996--1.004: the selections are hit by noise at least as often as random ones, as on USR (\S\ref{sec:credit}).
+
+\paragraph{Training.} The settings are those of Table~\ref{tab:hyper}; unlike \citet{storek-etal-2023-unsupervised}, who train MultiRC for five epochs without early stopping, we use patience 2 on both tasks. On MultiRC, all runs stopped early after three or four epochs and kept epoch 1 or 2. On FEVER, we capped training at 9.5 hours to fit Kaggle's 12-hour sessions: the fine-tuned runs stopped after 2.2 to 2.6 epochs and kept epoch 1 (two runs) or epoch 2 (seven runs, all still improving), and the FG runs stopped early after three epochs and kept epoch 1. An epoch took 0.9--1.2 hours with a fine-tuned generator and 0.5 hours with the frozen one on MultiRC, and 3.6--4.3 and 1.9--2.0 hours on FEVER (for runs stopped by the time limit: the time until the stop divided by the epochs trained, including the partial one). The 24 runs and their random-selection evaluations took about 146 GPU hours. Same-seed reruns of this code gave identical results on a CPU with a small BERT; we did not repeat a full run on a GPU.
+
+\paragraph{Defects in the released sentence-level code.} Besides the missing file of App.~\ref{app:defects} (item 2), we fixed four defects; each fix can be switched off.
+\begin{enumerate}
+  \setlength\itemsep{1pt}
+  \item \textbf{Sentence scores.} The selector subtracted a wordpiece position from word indices, so that on average 19.4\% (MultiRC) and 8.4\% (FEVER) of the evidence wordpieces of a test document counted toward the wrong sentence, in training and evaluation.
+  \item \textbf{Alignment.} As on USR, but by more positions: during training with noise, the rationale-based predictor received, for each selected word, the word $q + 1$ positions earlier, where $q$ is the number of wordpieces by which the query exceeds its number of words; this is often a word of another sentence. We call NI with this defect NI as released.
+  \item \textbf{Truncated sentences.} Sentences beyond the 512-wordpiece window received the score NaN, which top-$k$ ranks first, so they were selected although the generator never saw them.
+  \item \textbf{Comprehensiveness.} The input without the rationale contained the query twice and could exceed 512 wordpieces, which ended the evaluation with an error.
+\end{enumerate}
+
+\paragraph{Results.} Table~\ref{tab:sentence-full} adds precision, recall, faithfulness and the random-selection diagnostic to Table~\ref{tab:sentence}, and Table~\ref{tab:sentence-paired} gives the paired comparisons, computed as on USR (App.~\ref{app:definitions}). Comprehensiveness and sufficiency are close to zero on MultiRC, whose predictors barely use the selected sentences. On FEVER, the predictor of the frozen generator is less accurate also on random sentences (68.7\% vs.\ 80.0--81.0\%); presumably the closeness term, with its effective weight of 1.6 (App.~\ref{app:defects}), pulls it toward the attention-based predictor, which learns little from frozen states.
+
+\begin{table*}[t]
+\centering
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}lcccccccccc@{}}
+\toprule
+& & & & & \multicolumn{2}{c}{Sigmoid scale} & \multicolumn{2}{c}{Probabilities} & \multicolumn{2}{c}{Random sentences} \\
+\cmidrule(lr){6-7} \cmidrule(lr){8-9} \cmidrule(l){10-11}
+Model & Acc & P & R & F1 & Com $\uparrow$ & Suf $\downarrow$ & Com $\uparrow$ & Suf $\downarrow$ & Acc & One class \\
+\midrule
+\multicolumn{11}{@{}l}{\emph{MultiRC}} \\
+Tuned gen.\textsuperscript{$\ast$} & 66.1 & 18.5 & 21.9 & 19.3 & $-$.01 & $-$.02 & -- & -- & -- & -- \\
+Tuned gen.\ + NI\textsuperscript{$\ast$} & 66.4 & 22.6 & 26.9 & 23.8 & $-$.01 & $-$.02 & -- & -- & -- & -- \\
+A2R & 65.9 & 21.8 & 26.6 & 23.9 & .000 & .000 & .000 & .001 & 66.0 & 77 \\
+\ + NI & 66.1 & 20.0 & 24.5 & 22.0 & .001 & .001 & .003 & .004 & 65.8 & 71 \\
+\ + NI\textsubscript{released} & 66.2 & 18.7 & 22.9 & 20.6 & .000 & .001 & .002 & .006 & 65.7 & 76 \\
+FG & 65.3 & 15.5 & 18.9 & 17.1 & .000 & .000 & $-$.002 & $-$.002 & 65.1 & 81 \\
+Random sentences & -- & 15.9 & 19.4 & 17.5 & -- & -- & -- & -- & -- & -- \\
+\midrule
+\multicolumn{11}{@{}l}{\emph{FEVER}} \\
+Tuned gen.\textsuperscript{$\ast$} & 82.1 & 36.3 & 44.0 & 36.7 & .02 & $-$.01 & -- & -- & -- & -- \\
+Tuned gen.\ + NI\textsuperscript{$\ast$} & 78.2 & 39.0 & 47.2 & 39.5 & .02 & .00 & -- & -- & -- & -- \\
+A2R & 84.8 & 32.4 & 44.9 & 37.6 & .012 & .002 & .055 & .010 & 80.0 & 62 \\
+\ + NI & 84.2 & 33.6 & 46.5 & 39.0 & .010 & .003 & .043 & .012 & 80.5 & 63 \\
+\ + NI\textsubscript{released} & 84.1 & 31.4 & 43.5 & 36.5 & .008 & .003 & .037 & .016 & 81.0 & 62 \\
+FG & 69.8 & 24.4 & 33.8 & 28.4 & .003 & .002 & .012 & .007 & 68.7 & 80 \\
+Random sentences & -- & 17.1 & 23.7 & 19.8 & -- & -- & -- & -- & -- & -- \\
+\bottomrule
+\end{tabular}
+\caption{MultiRC and FEVER: full results (mean over seeds 1--3; sentence-level micro precision, recall and F1). Com, Suf: comprehensiveness and sufficiency of each model's own rationale-based predictor, on the sigmoid scale of the released code and on probabilities (App.~\ref{app:defects}). Random sentences: accuracy of the model's predictor on randomly chosen sentences, as many as the generator selects, and the share (\%) of documents it assigns to its more frequent class; the last row of each block gives the plausibility of these selections. \textsuperscript{$\ast$}Published \citep{storek-etal-2023-unsupervised}, five seeds; these rows do not come from the released evaluation (see text).}
+\label{tab:sentence-full}
+\end{table*}
+
+\begin{table*}[t]
+\centering
+\small
+\setlength{\tabcolsep}{3.5pt}
+\begin{tabular}{@{}lccccccc@{}}
+\toprule
+& \multicolumn{2}{c}{Seed 1} & \multicolumn{2}{c}{Seed 2} & \multicolumn{2}{c}{Seed 3} & Mean \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7} \cmidrule(l){8-8}
+Difference & $\Delta$ & 95\% CI & $\Delta$ & 95\% CI & $\Delta$ & 95\% CI & $\Delta$ \\
+\midrule
+\multicolumn{8}{@{}l}{\emph{MultiRC, sentence F1}} \\
+A2R+NI $-$ A2R & 0.90 & 0.20, 1.61 & $-$3.69 & $-$4.40, $-$2.98 & $-$2.91 & $-$3.61, $-$2.20 & $-$1.90 \\
+FG $-$ A2R & $-$7.21 & $-$8.16, $-$6.27 & $-$7.68 & $-$8.55, $-$6.81 & $-$5.72 & $-$6.59, $-$4.83 & $-$6.87 \\
+FG $-$ A2R+NI & $-$8.12 & $-$9.10, $-$7.12 & $-$3.99 & $-$4.71, $-$3.28 & $-$2.81 & $-$3.54, $-$2.08 & $-$4.97 \\
+A2R+NI\textsubscript{rel} $-$ A2R+NI & $-$4.80 & $-$5.56, $-$4.03 & 0.75 & 0.03, 1.48 & $-$0.26 & $-$0.94, 0.43 & $-$1.43 \\
+\addlinespace
+\multicolumn{8}{@{}l}{\emph{MultiRC, accuracy}} \\
+A2R+NI $-$ A2R & $-$0.52 & $-$1.20, 0.17 & 0.35 & $-$0.50, 1.22 & 0.78 & $-$0.45, 2.04 & 0.21 \\
+FG $-$ A2R & 0.10 & $-$0.70, 0.91 & $-$0.04 & $-$0.85, 0.76 & $-$1.77 & $-$2.60, $-$0.95 & $-$0.57 \\
+FG $-$ A2R+NI & 0.62 & $-$0.25, 1.51 & $-$0.39 & $-$1.32, 0.52 & $-$2.56 & $-$3.96, $-$1.20 & $-$0.78 \\
+A2R+NI\textsubscript{rel} $-$ A2R+NI & 0.19 & $-$0.56, 0.93 & 0.60 & $-$0.31, 1.46 & $-$0.43 & $-$1.65, 0.80 & 0.12 \\
+\addlinespace
+\multicolumn{8}{@{}l}{\emph{FEVER, sentence F1}} \\
+A2R+NI $-$ A2R & 0.10 & $-$0.34, 0.54 & 1.00 & 0.54, 1.47 & 2.90 & 2.25, 3.56 & 1.33 \\
+FG $-$ A2R & $-$12.96 & $-$13.95, $-$11.98 & $-$6.47 & $-$7.30, $-$5.63 & $-$8.37 & $-$9.36, $-$7.40 & $-$9.27 \\
+FG $-$ A2R+NI & $-$13.06 & $-$14.02, $-$12.09 & $-$7.46 & $-$8.29, $-$6.64 & $-$11.27 & $-$12.22, $-$10.31 & $-$10.60 \\
+A2R+NI\textsubscript{rel} $-$ A2R+NI & $-$7.65 & $-$8.49, $-$6.81 & 0.23 & $-$0.10, 0.56 & 0.02 & $-$0.49, 0.52 & $-$2.47 \\
+\addlinespace
+\multicolumn{8}{@{}l}{\emph{FEVER, accuracy}} \\
+A2R+NI $-$ A2R & $-$1.85 & $-$2.49, $-$1.19 & $-$0.77 & $-$1.34, $-$0.18 & 0.74 & 0.15, 1.31 & $-$0.63 \\
+FG $-$ A2R & $-$20.05 & $-$21.21, $-$18.88 & $-$12.03 & $-$12.99, $-$11.09 & $-$12.76 & $-$13.73, $-$11.80 & $-$14.95 \\
+FG $-$ A2R+NI & $-$18.20 & $-$19.26, $-$17.17 & $-$11.26 & $-$12.22, $-$10.31 & $-$13.50 & $-$14.47, $-$12.55 & $-$14.32 \\
+A2R+NI\textsubscript{rel} $-$ A2R+NI & $-$0.93 & $-$1.59, $-$0.28 & 0.88 & 0.31, 1.49 & $-$0.15 & $-$0.74, 0.44 & $-$0.07 \\
+\bottomrule
+\end{tabular}
+\caption{Paired differences on MultiRC and FEVER between models trained with the same seed (percentage points; 95\% confidence intervals from a paired bootstrap over the 4,848 and 6,111 test documents with 10,000 resamples; Mean: over the three seeds). A2R+NI\textsubscript{rel}: NI as released, with the alignment defect.}
+\label{tab:sentence-paired}
+\end{table*}
 
 \end{document}
