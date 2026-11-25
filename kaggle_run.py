@@ -57,6 +57,19 @@
 # start with the dataset (multirc_ni_seed1); TRUNCATION and WINDOW do not
 # apply. The noise level is that of Storek et al. (2023) for the dataset;
 # epochs, patience and validation as in the USR runs.
+#
+# Round 3 (TO_RUN.md):
+#   MultiRC/FEVER: a2r_dm, ni_dm, released_dm, frozen_dm  the generator attends to
+#             document tokens only (--document_attention)
+#   query_only  query-only BERT (cross-fitted, seed QUERY_ONLY_SEED), needed by:
+#   a2r_dm_poe, frozen_dm_poe, frozen_x_poe  generator trained as a product of
+#             experts with the query-only model (--poe_probs)
+#   smoke_r3  each round-3 option on small subsets (minutes)
+# DATASET = "hatexplain" runs HateXplain (GenSPP split) through run_words.py
+# with the USR stages (a2r, ni, frozen, probe, pack); "setup" downloads and
+# prepares it. Selection rate HX_SPARSITY, special tokens never selected.
+# A stage name may end in @wN to use WINDOW = N for that stage only, e.g.
+#     STAGES = ["setup", ["released", "frozen@w5"], "probe", "pack"]
 
 import glob
 import json
@@ -79,7 +92,7 @@ EVIDENCE_P = 0.3       # noise level of frozen_en
 EXPOSURE = 0.9         # exposure the controller of frozen_closed holds
 TRUNCATION = "right"   # reviews longer than 512 tokens: "right" keeps the beginning, "left" keeps the end
 WINDOW = 1             # rank tokens by attention averaged over this many tokens (odd); 5 selects phrases
-DATASET = "usr"        # "usr" (USR Movie Review), "multirc" or "fever"
+DATASET = "usr"        # "usr" (USR Movie Review), "multirc", "fever" or "hatexplain"
 TIME_LIMIT_HOURS = 9.5 # stop training after this long and evaluate the best checkpoint, so that a run
                        # fits into a 12-hour Kaggle session (USR runs since round 2, MultiRC/FEVER always)
 
@@ -90,8 +103,22 @@ TIME_LIMIT_HOURS = 9.5 # stop training after this long and evaluate the best che
 DR_RP_LR = 4e-6
 PERTURBATION = 0.2
 COUPLING = 1.0
-# USR probes run by the probe stage (None = all of PROBES)
-USR_PROBES = ["tail", "tail_random"]
+# USR probes run by the probe stage (None = all of PROBES; round 2 ran only
+# "tail" and "tail_random", round 3 needs all of them for seeds 4 and 5)
+USR_PROBES = None
+
+# Round 3 (2026-11-25), fixed before any run.
+# HateXplain as released by Mathew et al. (2021), pinned to the commits that last
+# changed the two files; GenSPP's split is rebuilt from them (prepare_dataset.py).
+HX_FILES = {"dataset.json": "2d804e29058726c76e835e043d9ec79169879fa6",
+            "post_id_divisions.json": "b94c830456f2088714a5635a2c79edac652a5c7b"}
+HX_URL = "https://raw.githubusercontent.com/hate-alert/HateXplain/{commit}/Data/{name}"
+# share of highlighted words in the training posts (9.96%); phrase selection
+# uses w = 3, the odd window closest to the mean training span (2.2 words): frozen@w3
+HX_SPARSITY = 0.1
+HX_PROBES = {"random": ["--selection_method", "random", "--mask_special_tokens"]}
+# seed of the query-only model of every PoE run, so that all seeds share it
+QUERY_ONLY_SEED = 1
 
 # MultiRC/FEVER: noise level of Storek et al. (2023) for the dataset; epochs,
 # patience and one validation per epoch as in our USR runs (run_words.py)
@@ -114,7 +141,8 @@ STATUS_EVERY = 300
 
 # stages that are one independent training run and may run in parallel
 PARALLEL_STAGES = ["ni", "released", "a2r", "exp", "cos", "closed", "full", "judge", "frozen", "frozen_ni", "frozen_en", "frozen_closed",
-                   "dr", "vicinal", "ni_coupled", "a2r_coupled", "frozen_x"]
+                   "dr", "vicinal", "ni_coupled", "a2r_coupled", "frozen_x",
+                   "a2r_dm", "ni_dm", "released_dm", "frozen_dm", "a2r_dm_poe", "frozen_dm_poe", "frozen_x_poe"]
 
 # probe stage: name -> options of run_words.py --evaluate
 PROBES = {
@@ -132,13 +160,17 @@ _parallel = threading.local()
 
 
 def is_ce():
-    if DATASET not in ["usr"] + list(CE):
-        raise ValueError(f"Unknown DATASET {DATASET!r}: use 'usr', 'multirc' or 'fever'")
+    if DATASET not in ["usr", "hatexplain"] + list(CE):
+        raise ValueError(f"Unknown DATASET {DATASET!r}: use 'usr', 'multirc', 'fever' or 'hatexplain'")
     return DATASET in CE
 
 
+def is_hx():
+    return not is_ce() and DATASET == "hatexplain"
+
+
 def data_path():
-    if is_ce():
+    if is_ce() or is_hx():
         return os.path.join(DATA_DIR, DATASET)
     return os.path.join(REPO, "usr_movie_review")
 
@@ -157,19 +189,41 @@ def device_args():
 
 
 def common():
+    if is_hx():
+        # short posts: no truncation; special tokens are never attended to or selected
+        return ["--data_path", data_path(), "--batch_size", BATCH, "--seed", SEED, "--sparsity", HX_SPARSITY,
+                "--mask_special_tokens"] + device_args()
     truncation = ["--truncation_side", "left"] if TRUNCATION == "left" else []
     return ["--data_path", data_path(), "--batch_size", BATCH, "--seed", SEED] + truncation + device_args()
 
 
+def window():
+    # WINDOW, or the window of a stage given as "name@wN"
+    override = getattr(_parallel, "window", None)
+    return WINDOW if override is None else override
+
+
+def split_stage(stage):
+    # "frozen@w5" -> ("frozen", 5); "frozen" -> ("frozen", None)
+    if "@w" in stage:
+        name, size = stage.split("@w")
+        if not size.isdigit() or int(size) % 2 == 0:
+            raise ValueError(f"Stage {stage!r}: the window after @w must be an odd number")
+        return name, int(size)
+    return stage, None
+
+
 def selection():
     # options of run_words.py only
-    return ["--selection_window", WINDOW] if WINDOW > 1 else []
+    return ["--selection_window", window()] if window() > 1 else []
 
 
 def run_name(name):
     if is_ce():
         return f"{DATASET}_{name}_seed{SEED}"
-    return name + ("_tail" if TRUNCATION == "left" else "") + (f"_w{WINDOW}" if WINDOW > 1 else "") + f"_seed{SEED}"
+    if is_hx():
+        return f"hatexplain_{name}" + (f"_w{window()}" if window() > 1 else "") + f"_seed{SEED}"
+    return name + ("_tail" if TRUNCATION == "left" else "") + (f"_w{window()}" if window() > 1 else "") + f"_seed{SEED}"
 
 
 def sh(*command, cwd = None):
@@ -277,9 +331,30 @@ def stage_setup():
     if is_ce():
         ce_setup()
         return
+    if is_hx():
+        hx_setup()
+    # word statistics of the training split (USR's script works for any dataset in its format)
     if not os.path.exists(stats_path("train_replacement_probs.pkl")):
         sh(sys.executable, "generate_word_statistics.py", f"--data_path={data_path()}",
            cwd = os.path.join(REPO, "data_preprocessing", "usr_movie_review"))
+
+
+def hx_setup():
+    # HateXplain: download the pinned release and rebuild GenSPP's split
+    if os.path.exists(os.path.join(data_path(), "test.jsonl")):
+        print(f"hatexplain is ready in {data_path()}")
+        return
+    import urllib.request
+    raw = os.path.join(DATA_DIR, "raw", "hatexplain")
+    os.makedirs(raw, exist_ok = True)
+    for name, commit in HX_FILES.items():
+        target = os.path.join(raw, name)
+        if not os.path.exists(target):
+            url = HX_URL.format(commit = commit, name = name)
+            print(f"Downloading {url}", flush = True)
+            urllib.request.urlretrieve(url, target)
+    sh(sys.executable, "prepare_dataset.py", "--raw_path", raw, "--data_path", data_path(),
+       cwd = os.path.join(REPO, "data_preprocessing", "hatexplain"))
 
 
 def stage_smoke():
@@ -450,6 +525,90 @@ def stage_frozen_x():
     ce_train_run("frozen_x", "--generator", "pairwise", "--freeze_encoder_bb")
 
 
+# Round 3, experiment 1: the joint generator attends to document tokens only
+def ce_only(stage):
+    if not is_ce():
+        raise RuntimeError(f"Stage '{stage}' is for MultiRC/FEVER only")
+
+
+def stage_a2r_dm():
+    ce_only("a2r_dm")
+    ce_train_run("a2r_dm", "--document_attention")
+
+
+def stage_ni_dm():
+    ce_only("ni_dm")
+    ce_train_run("ni_dm", "--inject_noise", "--noise_p", CE[DATASET]["p"], "--document_attention")
+
+
+def stage_released_dm():
+    ce_only("released_dm")
+    ce_train_run("released_dm", "--inject_noise", "--noise_p", CE[DATASET]["p"], "--legacy_alignment", "--document_attention")
+
+
+def stage_frozen_dm():
+    ce_only("frozen_dm")
+    ce_train_run("frozen_dm", "--freeze_encoder_bb", "--document_attention")
+
+
+# Round 3, experiment 2: product of experts with a query-only model
+def query_only_path():
+    return os.path.join(OUT, f"{DATASET}_query_only")
+
+
+def stage_query_only():
+    ce_only("query_only")
+    if os.path.exists(os.path.join(query_only_path(), "query_probs_train.json")):
+        print("== query_only is finished, skipping")
+        return
+    need(os.path.join(data_path(), "train.jsonl"), "setup")
+    python("query_only.py", "--data_path", data_path(), "--save_path", query_only_path(), "--seed", QUERY_ONLY_SEED, *device_args())
+
+
+def poe_options():
+    need(os.path.join(query_only_path(), "query_probs_train.json"), "query_only")
+    return ["--poe_probs", query_only_path()]
+
+
+def stage_a2r_dm_poe():
+    ce_only("a2r_dm_poe")
+    ce_train_run("a2r_dm_poe", "--document_attention", *poe_options())
+
+
+def stage_frozen_dm_poe():
+    ce_only("frozen_dm_poe")
+    ce_train_run("frozen_dm_poe", "--freeze_encoder_bb", "--document_attention", *poe_options())
+
+
+def stage_frozen_x_poe():
+    ce_only("frozen_x_poe")
+    ce_train_run("frozen_x_poe", "--generator", "pairwise", "--freeze_encoder_bb", *poe_options())
+
+
+def stage_smoke_r3():
+    # each round-3 option on small subsets for one epoch (minutes); "smoke"
+    # runs are ignored by probe and pack
+    subsets = ["--train_subset", 400, "--valid_subset", 100, "--test_subset", 100, "--num_epochs", 1]
+    if is_ce():
+        need(os.path.join(data_path(), "word_statistics", "train_replacement_probs.pkl"), "setup")
+        query_only = os.path.join(OUT, f"smoke_{DATASET}_query_only")
+        python("query_only.py", "--data_path", data_path(), "--save_path", query_only, "--subset", 400, "--num_epochs", 1)
+        for name, options in [("a2r_dm", ["--document_attention"]),
+                              ("ni_dm", ["--inject_noise", "--noise_p", CE[DATASET]["p"], "--document_attention"]),
+                              ("frozen_dm_poe", ["--freeze_encoder_bb", "--document_attention", "--poe_probs", query_only]),
+                              ("frozen_x_poe", ["--generator", "pairwise", "--freeze_encoder_bb", "--poe_probs", query_only])]:
+            print(f"== smoke {name}", flush = True)
+            python("run_ce.py", "--train", "--evaluate", *ce_common(), *subsets, "--patience", 2, "--validations_per_epoch", 1,
+                   *options, "--save_path", os.path.join(OUT, f"smoke_{DATASET}_{name}"))
+        return
+    need(stats_path("train_replacement_probs.pkl"), "setup")
+    for name, options in [("a2r", []), ("ni", ["--inject_noise", "--noise_p", P]),
+                          ("frozen_w3", ["--freeze_encoder_bb", "--selection_window", 3])]:
+        print(f"== smoke {name}", flush = True)
+        python("run_words.py", "--train", "--evaluate", *common(), *subsets, *options,
+               "--save_path", os.path.join(OUT, f"smoke_{DATASET}_{name}"))
+
+
 def stage_smoke_new():
     # each round-2 option on small subsets for one epoch (minutes), to catch
     # errors before the long runs; "smoke" runs are ignored by probe and pack
@@ -521,6 +680,8 @@ def ce_generator_options(run_path):
         config = json.load(f)
     if config.get("generator", "joint") == "pairwise":
         return ["--generator", "pairwise", "--pair_max_length", config.get("pair_max_length", 128)]
+    if config.get("document_attention"):
+        return ["--document_attention"]
     return []
 
 
@@ -557,15 +718,18 @@ def ce_probe():
 def stage_probe():
     if is_ce():
         return ce_probe()
-    runs = {name: path for name, path in find_runs().items() if not name.startswith(tuple(f"{dataset}_" for dataset in CE))}
+    if is_hx():
+        runs = {name: path for name, path in find_runs().items() if name.startswith("hatexplain_")}
+        probes = HX_PROBES
+    else:
+        runs = {name: path for name, path in find_runs().items() if not name.startswith(tuple(f"{dataset}_" for dataset in list(CE) + ["hatexplain"]))}
+        probes = {probe: options for probe, options in PROBES.items() if USR_PROBES is None or probe in USR_PROBES}
     if len(runs) == 0:
         raise RuntimeError(f"No trained runs in {OUT} or under {INPUTS}. Attach the output of an earlier session with Add Input")
     print(f"Runs: {', '.join(sorted(runs))}")
     jobs = []
     for name, run_path in sorted(runs.items()):
-        for probe, options in PROBES.items():
-            if USR_PROBES is not None and probe not in USR_PROBES:
-                continue
+        for probe, options in probes.items():
             target = os.path.join(OUT, "probe", f"{name}__{probe}")
             if os.path.exists(os.path.join(target, "results.json")):
                 continue
@@ -648,7 +812,7 @@ def log_lines(log_path):
 
 def run_parallel(*stages):
     # runs every stage at the same time, each on its own GPU
-    not_parallel = [stage for stage in stages if stage not in PARALLEL_STAGES]
+    not_parallel = [stage for stage in stages if split_stage(stage)[0] not in PARALLEL_STAGES]
     if not_parallel:
         raise ValueError(f"Cannot run in parallel: {', '.join(not_parallel)}. Parallel stages: {', '.join(PARALLEL_STAGES)}")
     if len(set(stages)) != len(stages):
@@ -662,17 +826,18 @@ def run_parallel(*stages):
 
     def work(stage, device, log_path):
         _parallel.device = device
+        name, _parallel.window = split_stage(stage)
         with open(log_path, "a") as log:
             _parallel.log = log
             try:
-                globals()[f"stage_{stage}"]()
+                globals()[f"stage_{name}"]()
             except Exception as error:
                 errors[stage] = error
                 print(f"FAILED: {error}", file = log, flush = True)
 
     jobs = []
     for stage, device in zip(stages, devices):
-        log_path = os.path.join(OUT, "logs", (f"{DATASET}_" if is_ce() else "") + f"{stage}_seed{SEED}.log")
+        log_path = os.path.join(OUT, "logs", (f"{DATASET}_" if is_ce() or is_hx() else "") + f"{stage.replace('@', '_')}_seed{SEED}.log")
         print(f"==== {stage} on {device}, log: {log_path}", flush = True)
         thread = threading.Thread(target = work, args = (stage, device, log_path))
         thread.start()
@@ -702,7 +867,8 @@ def run_parallel(*stages):
 
 def run(*stages):
     # a list of stages inside the list is run in parallel
-    unknown = [stage for item in stages for stage in (item if isinstance(item, (list, tuple)) else [item]) if f"stage_{stage}" not in globals()]
+    unknown = [stage for item in stages for stage in (item if isinstance(item, (list, tuple)) else [item])
+               if f"stage_{split_stage(stage)[0]}" not in globals()]
     if unknown:
         raise ValueError(f"Unknown stage: {', '.join(unknown)}")
     clone()
@@ -711,7 +877,11 @@ def run(*stages):
             run_parallel(*stage)
         else:
             print(f"==== {stage}", flush = True)
-            globals()[f"stage_{stage}"]()
+            name, _parallel.window = split_stage(stage)
+            try:
+                globals()[f"stage_{name}"]()
+            finally:
+                _parallel.window = None
 
 
 if __name__ == "__main__":

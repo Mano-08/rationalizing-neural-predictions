@@ -17,6 +17,18 @@ def js_div(P, Q):
     return (kl_div(P, M) + kl_div(Q, M))/2
 
 
+def poe_cross_entropy(att_pred, labels, query_logprobs = None):
+    # The cross-entropy of the attention-based predictor, applied to its
+    # probabilities as if they were logits, as in the released code. With
+    # query_logprobs (log-probabilities of a frozen query-only model), the loss
+    # is that of the product of experts softmax(att_pred + log q): examples the
+    # query alone already explains give the generator little gradient, those it
+    # gets wrong give it the most. A uniform q leaves the loss unchanged.
+    if query_logprobs is not None:
+        att_pred = att_pred + query_logprobs
+    return F.cross_entropy(att_pred, labels)
+
+
 class BlackBoxPredictor(nn.Module):
     def __init__(self, num_labels:int, model:str, freeze_encoder:bool, num_layers:Optional[int] = None):
         super().__init__()
@@ -76,8 +88,8 @@ class BlackBoxPredictor(nn.Module):
         # return predicted labels, per token probabilities P(z|x)
         return F.softmax(self.predictor(ctx_vec), -1), token_att
 
-    def get_loss(self, att_pred, hard_pred, labels, proximity):
-        return F.cross_entropy(att_pred, labels) + proximity * js_div(att_pred, hard_pred)
+    def get_loss(self, att_pred, hard_pred, labels, proximity, query_logprobs = None):
+        return poe_cross_entropy(att_pred, labels, query_logprobs) + proximity * js_div(att_pred, hard_pred)
 
 
 class RationalePredictor(nn.Module):

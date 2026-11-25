@@ -451,7 +451,7 @@ class PairwiseSentenceGenerator(torch.nn.Module):
             att_preds.append(torch.softmax(self.predictor(pooled), -1))
         return torch.stack(att_preds), token_att
 
-    def get_loss(self, att_pred, hard_pred, labels, proximity):
+    def get_loss(self, att_pred, hard_pred, labels, proximity, query_logprobs = None):
         # the loss of BlackBoxPredictor, cross-entropy on probabilities as released
-        from models import js_div
-        return torch.nn.functional.cross_entropy(att_pred, labels) + proximity * js_div(att_pred, hard_pred)
+        from models import js_div, poe_cross_entropy
+        return poe_cross_entropy(att_pred, labels, query_logprobs) + proximity * js_div(att_pred, hard_pred)

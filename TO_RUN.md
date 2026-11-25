@@ -6,6 +6,77 @@ rationales; their Table 2), and our Limitations names both as open. This file
 lists the runs that add them, with the same models, seeds and protocol as the
 USR runs in the paper.
 
+## Round 3 (planned 2026-11-25): experiments 1, 2, 3 and 5
+
+Round 2 (results_v27-v38) is done and in the paper. Round 3 was chosen after a
+second literature review; every setting below was fixed before any run.
+
+| # | Experiment | Stages | What it tests |
+| --- | --- | --- | --- |
+| 1 | The joint generator attends to document tokens only (`--document_attention`). In the released code, its attention also covers the query, [SEP] and padding, so on FEVER it can meet its loss by attending to the claim | MultiRC, FEVER: `a2r_dm`, `ni_dm`, `released_dm`, `frozen_dm` | whether this design of the released code is why every trained model is far below BM25 |
+| 2 | Product of experts with a query-only BERT: the generator is trained on what the selected evidence adds to the query (`--poe_probs`) | MultiRC, FEVER: `query_only`, then `a2r_dm_poe`, `frozen_dm_poe`, `frozen_x_poe` | whether removing the query shortcut makes the generator find the evidence |
+| 3 | HateXplain, GenSPP's split (rebuilt from the original release), selection rate 10% (training highlight rate), phrase window 3 (mean training span 2.2 words), special tokens never selected | `hatexplain`: `a2r`, `ni`, `frozen`, `frozen@w3` | whether the USR findings hold on a second token-level dataset; comparison with GenSPP (ACL 2025) and ReSR (EMNLP 2026) |
+| 5 | USR seeds 4 and 5 | `usr`: `a2r`, `ni`, `released`, `frozen@w5` | five seeds, like the published numbers |
+
+The query-only model is cross-fitted (two halves, each predicting the other),
+with seed 1 in every session, so all PoE runs of a dataset use the same one.
+`frozen@w3` / `frozen@w5` run the frozen generator with that phrase window, so it
+can share a session with single-token runs. Tested on the Mac (small BERT, real
+data): every stage runs; all attention falls on document tokens; with a uniform
+query-only model the PoE loss equals the old loss, with a confident correct one
+the generator gets no gradient; the HateXplain split has GenSPP's sizes (10,783 /
+1,369 / 1,355 posts).
+
+**Before the first session: push the code to `ani` and paste the new
+`kaggle_run.py` into the notebook cell.**
+
+### Session 0c: check (about 1 hour, first)
+
+Main cell: `STAGES = ["setup", "smoke_r3"]`, `SEED = 1`, `BATCH = 16`,
+`DATASET = "multirc"`, `TRUNCATION = "right"`. Then two more cells:
+
+```python
+DATASET = "fever"; run("setup", "smoke_r3")
+DATASET = "hatexplain"; run("setup", "smoke_r3")
+```
+
+Expected: each smoke run ends with test metrics and no error. **Delete the two
+extra cells afterwards.** Nothing to download.
+
+### Wave 1 (after 0c): all of experiments 3 and 5, seed 1 of experiments 1 and 2
+
+`BATCH = 16` everywhere. GPU T4 x2, Internet on, Save Version -> Save & Run All.
+
+| # | DATASET | TRUNCATION | SEED | STAGES | est. time | save as |
+| --- | --- | --- | --- | --- | --- | --- |
+| U1 | `"usr"` | `"left"` | 4 | `["setup", ["a2r", "ni"], "probe", "pack"]` | 6-10 h | `results/results_v39` |
+| U2 | `"usr"` | `"left"` | 4 | `["setup", ["released", "frozen@w5"], "probe", "pack"]` | 6-10 h | `results/results_v40` |
+| U3 | `"usr"` | `"left"` | 5 | `["setup", ["a2r", "ni"], "probe", "pack"]` | 6-10 h | `results/results_v41` |
+| U4 | `"usr"` | `"left"` | 5 | `["setup", ["released", "frozen@w5"], "probe", "pack"]` | 6-10 h | `results/results_v42` |
+| H1 | `"hatexplain"` | `"right"` | 1 | `["setup", ["a2r", "ni"], ["frozen", "frozen@w3"], "probe", "pack"]` | 1-2 h | `results/results_v43` |
+| H2 | `"hatexplain"` | `"right"` | 2 | same as H1 | 1-2 h | `results/results_v44` |
+| H3 | `"hatexplain"` | `"right"` | 3 | same as H1 | 1-2 h | `results/results_v45` |
+| M1 | `"multirc"` | `"right"` | 1 | `["setup", ["a2r_dm", "ni_dm"], ["released_dm", "frozen_dm"], "probe", "pack"]` | 9-10 h | `results/results_v46` |
+| M2 | `"multirc"` | `"right"` | 1 | `["setup", "query_only", ["a2r_dm_poe", "frozen_dm_poe"], "frozen_x_poe", "probe", "pack"]` | 6-8 h | `results/results_v47` |
+| F1 | `"fever"` | `"right"` | 1 | `["setup", ["a2r_dm", "ni_dm"], "probe", "pack"]` | 10.5 h | `results/results_v48` |
+| F2 | `"fever"` | `"right"` | 1 | `["setup", ["released_dm", "frozen_dm"], "probe", "pack"]` | 10.5 h | `results/results_v49` |
+| F3 | `"fever"` | `"right"` | 1 | `["setup", "query_only", ["a2r_dm_poe", "frozen_x_poe"], "probe", "pack"]` | 11 h | `results/results_v50` |
+| F4 | `"fever"` | `"right"` | 1 | `["setup", "query_only", ["frozen_dm_poe"], "probe", "pack"]` | 7-8 h | `results/results_v51` |
+
+USR sessions need `TRUNCATION = "left"`. F3 is the longest session (about 11 of
+Kaggle's 12 hours: round-1 FEVER sessions took 10.1 h, plus the query-only model).
+
+### Wave 2 (after I have checked M1, M2 and F1-F4): seeds 2 and 3
+
+The same six MultiRC/FEVER sessions (M1, M2, F1-F4) with `SEED = 2` and `SEED = 3`:
+
+| SEED | M1 | M2 | F1 | F2 | F3 | F4 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 2 | `results_v52` | `results_v53` | `results_v54` | `results_v55` | `results_v56` | `results_v57` |
+| 3 | `results_v58` | `results_v59` | `results_v60` | `results_v61` | `results_v62` | `results_v63` |
+
+About 330 GPU hours for both waves.
+
 ## Round 2 (planned 2026-11-23): experiments 1, 2, 4 and 5
 
 **This replaces "No further runs are planned" below.** Four experiments chosen

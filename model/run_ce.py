@@ -83,6 +83,13 @@ def parse_args():
     # on its own and trains only its two linear layers
     parser.add_argument('--generator', type = str, default = "joint", choices = ["joint", "pairwise"])
     parser.add_argument('--pair_max_length', type = int, default = 128)
+    # Joint generator: attend to document tokens only. The released generator's
+    # attention also covers the query, [SEP] and padding, so its loss can be met
+    # by attending to the query alone.
+    parser.add_argument('--document_attention', action = "store_true")
+    # Product of experts with a frozen query-only model (output of query_only.py):
+    # the generator is trained on what the selected evidence adds to the query
+    parser.add_argument('--poe_probs', type = str, default = None)
     # Use the first examples only, for a fast debugging loop
     parser.add_argument('--train_subset', type = int, default = None)
     parser.add_argument('--valid_subset', type = int, default = None)
@@ -110,6 +117,8 @@ def main(args):
     if args.generator == "pairwise":
         if args.selection_method != "sentences":
             raise ValueError("--generator pairwise requires --selection_method sentences")
+        if args.document_attention:
+            raise ValueError("--document_attention is for the joint generator; the pairwise one attends to sentences only")
         bb_model = PairwiseSentenceGenerator(num_labels = 2, model = args.model, tokenizer = tokenizer, selector = rationale_selector,
                                              max_pair_length = args.pair_max_length).to(args.device)
     else:
@@ -149,6 +158,13 @@ def main(args):
 
         validation_rationale_extractor = RationaleExtractor(tokenizer, args.device, legacy_selection = args.legacy_selection)
 
+        poe = None
+        if args.poe_probs is not None:
+            poe = {}
+            for split in ("train", "valid"):
+                with open(os.path.join(args.poe_probs, f"query_probs_{split}.json")) as f:
+                    poe[split] = json.load(f)
+
         train(
             bb_model = bb_model,
             bb_optimizer = bb_optimizer,
@@ -166,6 +182,9 @@ def main(args):
             rationale_extractor = rationale_extractor,
             validation_rationale_extractor = validation_rationale_extractor,
             time_limit_hours = args.time_limit_hours,
+            document_attention = args.document_attention,
+            sep_token_id = tokenizer.sep_token_id,
+            poe = poe,
         )
 
     if args.evaluate:
@@ -194,7 +213,9 @@ def main(args):
             sentence_selector = sentence_selector,
             checkpoint_dir = checkpoint_dir,
             result_path = args.save_path,
-            random_selection = args.random_selection
+            random_selection = args.random_selection,
+            document_attention = args.document_attention,
+            sep_token_id = tokenizer.sep_token_id
         )
 
 def train(
@@ -214,6 +235,9 @@ def train(
     rationale_extractor,
     validation_rationale_extractor,
     time_limit_hours = None,
+    document_attention = False,
+    sep_token_id = None,
+    poe = None,
     ):
 
     start_time = time.time()
@@ -259,7 +283,7 @@ def train(
 
                 # generate prediction and token probs of being in a rationale
                 batch.tokenized_examples = batch.tokenized_examples.to(device)
-                att_pred, token_att = generate(bb_model, batch)
+                att_pred, token_att = generate(bb_model, batch, document_attention, sep_token_id)
 
                 with torch.no_grad():
                     hard_mask = rationale_selector(batch, token_att)
@@ -267,12 +291,13 @@ def train(
 
                 # predict from rationale
                 hard_pred = rp_model(**rationale)
-            
+
                 bb_loss = bb_model.get_loss(
                     att_pred = att_pred,
                     hard_pred = hard_pred.detach(),
                     labels = batch.labels_bb.to(device),
-                    proximity = proximity
+                    proximity = proximity,
+                    query_logprobs = query_logprobs(poe, "train", batch, device)
                 )
 
                 rp_loss = rp_model.get_loss(
@@ -307,7 +332,7 @@ def train(
                         for batch in valid_loader:
                             # generate prediction and token probs of being in a rationale
                             batch.tokenized_examples = batch.tokenized_examples.to(device)
-                            att_pred, token_att = generate(bb_model, batch)
+                            att_pred, token_att = generate(bb_model, batch, document_attention, sep_token_id)
 
                             with torch.no_grad():
                                 hard_mask = rationale_selector(batch, token_att)
@@ -315,12 +340,13 @@ def train(
 
                             # predict from rationale
                             hard_pred = rp_model(**rationale)
-            
+
                             bb_valid = bb_model.get_loss(
                                 att_pred = att_pred,
                                 hard_pred = hard_pred,
                                 labels = batch.labels_bb.to(device),
-                                proximity = proximity
+                                proximity = proximity,
+                                query_logprobs = query_logprobs(poe, "valid", batch, device)
                             )
 
                             rp_valid = rp_model.get_loss(
@@ -412,7 +438,9 @@ def evaluate(
     sentence_selector,
     checkpoint_dir,
     result_path,
-    random_selection = False
+    random_selection = False,
+    document_attention = False,
+    sep_token_id = None
     ):
 
     if checkpoint_dir is not None:
@@ -448,7 +476,7 @@ def evaluate(
         for batch in tqdm(test_loader):
             batch.tokenized_examples = batch.tokenized_examples.to(device)
             # generate prediction and token probs of being in a rationale
-            _, token_att = generate(bb_model, batch)
+            _, token_att = generate(bb_model, batch, document_attention, sep_token_id)
             # mask based on probs
             if random_selection:
                 hard_mask, selected_sentences = sentence_selector.select(batch, token_att)
@@ -552,11 +580,36 @@ def set_seed(seed):
     torch.cuda.manual_seed_all(seed)
 
 
-def generate(bb_model, batch):
+def generate(bb_model, batch, document_attention = False, sep_token_id = None):
     # class probabilities of the attention-based predictor and token attention
     if isinstance(bb_model, PairwiseSentenceGenerator):
         return bb_model(batch)
+    if document_attention:
+        return bb_model(**batch.tokenized_examples, selectable = document_tokens(batch, sep_token_id))
     return bb_model(**batch.tokenized_examples)
+
+
+def document_tokens(batch, sep_token_id):
+    # [CLS] query [SEP] document [SEP] padding: True for the document's tokens,
+    # aligned with the generator's attention, which leaves out [CLS]
+    input_ids = batch.tokenized_examples.input_ids
+    real = (batch.tokenized_examples.attention_mask == 1) & (input_ids != sep_token_id)
+    positions = torch.arange(input_ids.shape[1], device = input_ids.device).unsqueeze(0)
+    start = torch.tensor(batch.evidences_start, device = input_ids.device).unsqueeze(1)
+    selectable = (real & (positions >= start))[:, 1:]
+    # a query that fills the whole window leaves no document token: keep every real token
+    empty = ~selectable.any(dim = 1)
+    if empty.any():
+        selectable[empty] = real[:, 1:][empty]
+    return selectable
+
+
+def query_logprobs(poe, split, batch, device):
+    # log-probabilities of the frozen query-only model for the batch's queries
+    if poe is None:
+        return None
+    probs = [poe[split][" ".join(query)] for query in batch.examples.queries]
+    return torch.tensor(probs, dtype = torch.float, device = device).clamp_min(1e-6).log()
 
 
 def get_num_params(model):
