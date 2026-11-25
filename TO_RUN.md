@@ -6,6 +6,72 @@ rationales; their Table 2), and our Limitations names both as open. This file
 lists the runs that add them, with the same models, seeds and protocol as the
 USR runs in the paper.
 
+## Round 4 (planned 2026-11-26): Hotel Reviews
+
+A second dataset of long reviews, after HateXplain (short posts) showed no label
+encoding: does freezing help where the label is spread over a long text, as on USR?
+Hotel Reviews (Wang et al., 2010) with the human rationales of Bao et al. (2018) is
+one of the two benchmarks of FR, MGR, DR and VER (VER, TACL 2025, Table 1 reports
+RNP, NIR (noise injection), A2I and VER at a selection rate of about 15%). One
+dataset per aspect: Location, Service, Cleanliness, each with 200 test reviews whose
+aspect text people marked (8.5%, 11.3% and 8.8% of the words, spans of 7.5-10.7 words).
+
+**The standard split contains its test reviews in the training set:** all 200
+(Location, Service) and 199 of 199 (Cleanliness) test reviews are training reviews
+(242, 292 and 258 copies in all), and 9-11 are also validation reviews. This likely
+explains the 97% test accuracy reported for every model. We therefore run a **clean split**
+(`hotel_location`, `hotel_service`, `hotel_cleanliness`): the test reviews are removed
+from training and validation, and validation reviews that also occur in training are
+dropped. For comparison with the published numbers, Location also runs on the
+**standard split** (`hotel_location_std`). Prepared by
+`data_preprocessing/hotel/prepare_dataset.py` from the archive of Bao et al.
+(checked by its SHA-256 in `kaggle_run.py`):
+
+| DATASET | training | validation | test |
+| --- | --- | --- | --- |
+| `hotel_location` | 14,230 | 1,479 | 200 |
+| `hotel_service` | 101,192 | 9,628 | 200 |
+| `hotel_cleanliness` | 149,840 | 14,239 | 199 (one review whose marks do not match its tokens is dropped) |
+| `hotel_location_std` | 14,472 | 1,812 | 200 |
+
+Settings, fixed before any run: selection rate 15% (as in VER's table), phrase window
+5 (as on USR; there are no training rationales to set it from), at most 30 epochs with
+patience 2 (as HateXplain H4-H6), the 9.5 h time limit, special tokens never selected,
+NI at p = 0.2, batch 16, seeds 1-3. Models: A2R, +NI, FG and FG+PS (`frozen@w5`).
+Probes: random selection, single tokens (`w1`: FG for the `frozen@w5` model) and
+phrases (`w5`: +PS for the other models). Tested on the Mac (tiny BERT, real data):
+all four datasets are prepared with the sizes above, the four models and three probes
+run, the selection is exactly 15% of the wordpieces with no special tokens, the window
+gives spans of about 3.9 words, and a corrupted archive is refused.
+
+**Paste the new `kaggle_run.py` before these sessions.** `TRUNCATION` does not apply.
+
+### Wave A: Location (clean and standard split)
+
+| # | DATASET | SEED | STAGES | est. time | save as |
+| --- | --- | --- | --- | --- | --- |
+| L1 | `"hotel_location"` | 1 | `["setup", ["a2r", "ni"], ["frozen", "frozen@w5"], "probe", "pack"]` | 4-8 h | `results/results_v67` |
+| L2 | `"hotel_location"` | 2 | same as L1 | 4-8 h | `results/results_v68` |
+| L3 | `"hotel_location"` | 3 | same as L1 | 4-8 h | `results/results_v69` |
+| L4 | `"hotel_location_std"` | 1 | same as L1 | 4-8 h | `results/results_v70` |
+| L5 | `"hotel_location_std"` | 2 | same as L1 | 4-8 h | `results/results_v71` |
+| L6 | `"hotel_location_std"` | 3 | same as L1 | 4-8 h | `results/results_v72` |
+
+### Wave B (after I have checked wave A): Service and Cleanliness, clean split
+
+Their training sets are 7-10 times larger, so the fine-tuned and the frozen models
+run in separate sessions (each pair takes up to the 9.5 h limit):
+
+| SEED | Service, `["setup", ["a2r", "ni"], "probe", "pack"]` | Service, `["setup", ["frozen", "frozen@w5"], "probe", "pack"]` | Cleanliness, `["setup", ["a2r", "ni"], "probe", "pack"]` | Cleanliness, `["setup", ["frozen", "frozen@w5"], "probe", "pack"]` |
+| --- | --- | --- | --- | --- |
+| 1 | `results_v73` | `results_v76` | `results_v79` | `results_v82` |
+| 2 | `results_v74` | `results_v77` | `results_v80` | `results_v83` |
+| 3 | `results_v75` | `results_v78` | `results_v81` | `results_v84` |
+
+`DATASET = "hotel_service"` or `"hotel_cleanliness"`; about 10 h each. In
+Cleanliness, the fine-tuned runs will probably reach the time limit after 2 epochs (as
+on FEVER). About 300 GPU hours for both waves.
+
 ## Round 3 (planned 2026-11-25): experiments 1, 2, 3 and 5
 
 Round 2 (results_v27-v38) is done and in the paper. Round 3 was chosen after a

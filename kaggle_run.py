@@ -69,6 +69,10 @@
 # with the USR stages (a2r, ni, frozen, probe, pack); "setup" downloads and
 # prepares it. Selection rate HX_SPARSITY, special tokens never selected,
 # at most HX_EPOCHS epochs.
+# Round 4 (TO_RUN.md): DATASET = "hotel_location", "hotel_service",
+# "hotel_cleanliness" (clean split) or "hotel_location_std" (split of the
+# literature) runs one aspect of Hotel Reviews in the same way (HOTEL settings);
+# run names start with the dataset (hotel_location_frozen_w5_e30_seed1).
 # A stage name may end in @wN to use WINDOW = N for that stage only, e.g.
 #     STAGES = ["setup", ["released", "frozen@w5"], "probe", "pack"]
 
@@ -93,7 +97,7 @@ EVIDENCE_P = 0.3       # noise level of frozen_en
 EXPOSURE = 0.9         # exposure the controller of frozen_closed holds
 TRUNCATION = "right"   # reviews longer than 512 tokens: "right" keeps the beginning, "left" keeps the end
 WINDOW = 1             # rank tokens by attention averaged over this many tokens (odd); 5 selects phrases
-DATASET = "usr"        # "usr" (USR Movie Review), "multirc", "fever" or "hatexplain"
+DATASET = "usr"        # "usr" (USR Movie Review), "multirc", "fever", "hatexplain" or a key of HOTEL
 TIME_LIMIT_HOURS = 9.5 # stop training after this long and evaluate the best checkpoint, so that a run
                        # fits into a 12-hour Kaggle session (USR runs since round 2, MultiRC/FEVER always)
 
@@ -124,6 +128,25 @@ HX_SPARSITY = 0.1
 # other than 5 are named hatexplain_<name>_e<cap>_seed<N>
 HX_EPOCHS = 30
 HX_PROBES = {"random": ["--selection_method", "random", "--mask_special_tokens"]}
+
+# Round 4 (2026-11-26), fixed before any run. Hotel Reviews (Wang et al., 2010) with
+# the human rationales of Bao et al. (2018), from their archive (checksum below); the
+# split of FR, MGR, DR and VER, rebuilt by data_preprocessing/hotel/prepare_dataset.py.
+# DATASET -> (aspect, split). In the standard split, every test review is also a
+# training review; "clean" removes them from training and validation, and drops the
+# validation reviews that also occur in training.
+HOTEL = {"hotel_location": ("Location", "clean"), "hotel_service": ("Service", "clean"),
+         "hotel_cleanliness": ("Cleanliness", "clean"), "hotel_location_std": ("Location", "standard")}
+HOTEL_URL = "https://people.csail.mit.edu/yujia/files/r2a/data.zip"
+HOTEL_SHA256 = "23fcb4cac883ec1de86d83a7747294d7fdae10061d3803fd4c34c930e66f25de"
+# selection rate of VER's results table (about 15% on every aspect), so that the
+# published numbers are at the same rate; phrase window 5 as on USR (there are no
+# training rationales to set it from): frozen@w5. Epoch cap as for HateXplain.
+HOTEL_SPARSITY = 0.15
+HOTEL_EPOCHS = 30
+# random selection; single tokens (FG for the frozen@w5 model); phrases (+PS for the others)
+HOTEL_PROBES = {"random": ["--selection_method", "random", "--mask_special_tokens"],
+                "w1": [], "w5": ["--selection_window", 5]}
 # seed of the query-only model of every PoE run, so that all seeds share it
 QUERY_ONLY_SEED = 1
 
@@ -167,8 +190,8 @@ _parallel = threading.local()
 
 
 def is_ce():
-    if DATASET not in ["usr", "hatexplain"] + list(CE):
-        raise ValueError(f"Unknown DATASET {DATASET!r}: use 'usr', 'multirc', 'fever' or 'hatexplain'")
+    if DATASET not in ["usr", "hatexplain"] + list(CE) + list(HOTEL):
+        raise ValueError(f"Unknown DATASET {DATASET!r}: use 'usr', 'multirc', 'fever', 'hatexplain' or one of {', '.join(HOTEL)}")
     return DATASET in CE
 
 
@@ -176,8 +199,30 @@ def is_hx():
     return not is_ce() and DATASET == "hatexplain"
 
 
+def is_hotel():
+    return not is_ce() and DATASET in HOTEL
+
+
+def is_prepared():
+    # token-level datasets that setup downloads and prepares (all but USR)
+    return is_hx() or is_hotel()
+
+
+def token_settings():
+    # selection rate, epoch cap and probes of a prepared token-level dataset
+    if is_hx():
+        return {"sparsity": HX_SPARSITY, "epochs": HX_EPOCHS, "probes": HX_PROBES}
+    return {"sparsity": HOTEL_SPARSITY, "epochs": HOTEL_EPOCHS, "probes": HOTEL_PROBES}
+
+
+def of_dataset(name):
+    # run of this dataset, not of another one whose name extends it (hotel_location_std)
+    longer = [other for other in list(HOTEL) + ["hatexplain"] if other != DATASET and other.startswith(DATASET)]
+    return name.startswith(DATASET + "_") and not name.startswith(tuple(f"{other}_" for other in longer))
+
+
 def data_path():
-    if is_ce() or is_hx():
+    if is_ce() or is_prepared():
         return os.path.join(DATA_DIR, DATASET)
     return os.path.join(REPO, "usr_movie_review")
 
@@ -196,10 +241,12 @@ def device_args():
 
 
 def common():
-    if is_hx():
-        # short posts: no truncation; special tokens are never attended to or selected
-        return ["--data_path", data_path(), "--batch_size", BATCH, "--seed", SEED, "--sparsity", HX_SPARSITY,
-                "--mask_special_tokens", "--num_epochs", HX_EPOCHS] + device_args()
+    if is_prepared():
+        # HateXplain and Hotel: no truncation (posts of at most 30 words, reviews of at
+        # most 300); special tokens are never attended to or selected
+        settings = token_settings()
+        return ["--data_path", data_path(), "--batch_size", BATCH, "--seed", SEED, "--sparsity", settings["sparsity"],
+                "--mask_special_tokens", "--num_epochs", settings["epochs"]] + device_args()
     truncation = ["--truncation_side", "left"] if TRUNCATION == "left" else []
     return ["--data_path", data_path(), "--batch_size", BATCH, "--seed", SEED] + truncation + device_args()
 
@@ -228,8 +275,9 @@ def selection():
 def run_name(name):
     if is_ce():
         return f"{DATASET}_{name}_seed{SEED}"
-    if is_hx():
-        return f"hatexplain_{name}" + (f"_w{window()}" if window() > 1 else "") + (f"_e{HX_EPOCHS}" if HX_EPOCHS != 5 else "") + f"_seed{SEED}"
+    if is_prepared():
+        epochs = token_settings()["epochs"]
+        return f"{DATASET}_{name}" + (f"_w{window()}" if window() > 1 else "") + (f"_e{epochs}" if epochs != 5 else "") + f"_seed{SEED}"
     return name + ("_tail" if TRUNCATION == "left" else "") + (f"_w{window()}" if window() > 1 else "") + f"_seed{SEED}"
 
 
@@ -340,10 +388,37 @@ def stage_setup():
         return
     if is_hx():
         hx_setup()
+    if is_hotel():
+        hotel_setup()
     # word statistics of the training split (USR's script works for any dataset in its format)
     if not os.path.exists(stats_path("train_replacement_probs.pkl")):
         sh(sys.executable, "generate_word_statistics.py", f"--data_path={data_path()}",
            cwd = os.path.join(REPO, "data_preprocessing", "usr_movie_review"))
+
+
+def hotel_setup():
+    # Hotel: download the archive of Bao et al. (2018), check it, prepare one aspect
+    if os.path.exists(os.path.join(data_path(), "test.jsonl")):
+        print(f"{DATASET} is ready in {data_path()}")
+        return
+    import hashlib
+    import urllib.request
+    raw = os.path.join(DATA_DIR, "raw", "hotel")
+    os.makedirs(raw, exist_ok = True)
+    archive = os.path.join(raw, "data.zip")
+    if not os.path.exists(archive):
+        print(f"Downloading {HOTEL_URL}", flush = True)
+        urllib.request.urlretrieve(HOTEL_URL, archive + ".part")
+        os.replace(archive + ".part", archive)
+    digest = hashlib.sha256()
+    with open(archive, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+    if digest.hexdigest() != HOTEL_SHA256:
+        raise RuntimeError(f"{archive} has checksum {digest.hexdigest()}, expected {HOTEL_SHA256}: delete it and run setup again")
+    aspect, split = HOTEL[DATASET]
+    sh(sys.executable, "prepare_dataset.py", "--zip_path", archive, "--aspect", aspect, "--split", split,
+       "--data_path", data_path(), cwd = os.path.join(REPO, "data_preprocessing", "hotel"))
 
 
 def hx_setup():
@@ -725,11 +800,11 @@ def ce_probe():
 def stage_probe():
     if is_ce():
         return ce_probe()
-    if is_hx():
-        runs = {name: path for name, path in find_runs().items() if name.startswith("hatexplain_")}
-        probes = HX_PROBES
+    if is_prepared():
+        runs = {name: path for name, path in find_runs().items() if of_dataset(name)}
+        probes = token_settings()["probes"]
     else:
-        runs = {name: path for name, path in find_runs().items() if not name.startswith(tuple(f"{dataset}_" for dataset in list(CE) + ["hatexplain"]))}
+        runs = {name: path for name, path in find_runs().items() if not name.startswith(tuple(f"{dataset}_" for dataset in list(CE) + ["hatexplain"] + list(HOTEL)))}
         probes = {probe: options for probe, options in PROBES.items() if USR_PROBES is None or probe in USR_PROBES}
     if len(runs) == 0:
         raise RuntimeError(f"No trained runs in {OUT} or under {INPUTS}. Attach the output of an earlier session with Add Input")
@@ -844,7 +919,7 @@ def run_parallel(*stages):
 
     jobs = []
     for stage, device in zip(stages, devices):
-        log_path = os.path.join(OUT, "logs", (f"{DATASET}_" if is_ce() or is_hx() else "") + f"{stage.replace('@', '_')}_seed{SEED}.log")
+        log_path = os.path.join(OUT, "logs", (f"{DATASET}_" if is_ce() or is_prepared() else "") + f"{stage.replace('@', '_')}_seed{SEED}.log")
         print(f"==== {stage} on {device}, log: {log_path}", flush = True)
         thread = threading.Thread(target = work, args = (stage, device, log_path))
         thread.start()
