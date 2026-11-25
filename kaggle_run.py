@@ -67,7 +67,8 @@
 #   smoke_r3  each round-3 option on small subsets (minutes)
 # DATASET = "hatexplain" runs HateXplain (GenSPP split) through run_words.py
 # with the USR stages (a2r, ni, frozen, probe, pack); "setup" downloads and
-# prepares it. Selection rate HX_SPARSITY, special tokens never selected.
+# prepares it. Selection rate HX_SPARSITY, special tokens never selected,
+# at most HX_EPOCHS epochs.
 # A stage name may end in @wN to use WINDOW = N for that stage only, e.g.
 #     STAGES = ["setup", ["released", "frozen@w5"], "probe", "pack"]
 
@@ -116,6 +117,12 @@ HX_URL = "https://raw.githubusercontent.com/hate-alert/HateXplain/{commit}/Data/
 # share of highlighted words in the training posts (9.96%); phrase selection
 # uses w = 3, the odd window closest to the mean training span (2.2 words): frozen@w3
 HX_SPARSITY = 0.1
+# at most this many epochs (patience 2 as everywhere). Changed from 5 after
+# results_v43-v45: with 674 updates per epoch (USR: 2,500), the frozen generator's
+# validation loss was still falling after 5 epochs in 5 of 6 runs; the fine-tuned runs
+# stopped by patience within 5 epochs. 30 epochs = 20,220 updates. Runs with a cap
+# other than 5 are named hatexplain_<name>_e<cap>_seed<N>
+HX_EPOCHS = 30
 HX_PROBES = {"random": ["--selection_method", "random", "--mask_special_tokens"]}
 # seed of the query-only model of every PoE run, so that all seeds share it
 QUERY_ONLY_SEED = 1
@@ -192,7 +199,7 @@ def common():
     if is_hx():
         # short posts: no truncation; special tokens are never attended to or selected
         return ["--data_path", data_path(), "--batch_size", BATCH, "--seed", SEED, "--sparsity", HX_SPARSITY,
-                "--mask_special_tokens"] + device_args()
+                "--mask_special_tokens", "--num_epochs", HX_EPOCHS] + device_args()
     truncation = ["--truncation_side", "left"] if TRUNCATION == "left" else []
     return ["--data_path", data_path(), "--batch_size", BATCH, "--seed", SEED] + truncation + device_args()
 
@@ -222,7 +229,7 @@ def run_name(name):
     if is_ce():
         return f"{DATASET}_{name}_seed{SEED}"
     if is_hx():
-        return f"hatexplain_{name}" + (f"_w{window()}" if window() > 1 else "") + f"_seed{SEED}"
+        return f"hatexplain_{name}" + (f"_w{window()}" if window() > 1 else "") + (f"_e{HX_EPOCHS}" if HX_EPOCHS != 5 else "") + f"_seed{SEED}"
     return name + ("_tail" if TRUNCATION == "left" else "") + (f"_w{window()}" if window() > 1 else "") + f"_seed{SEED}"
 
 

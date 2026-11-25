@@ -77,6 +77,25 @@ The same six MultiRC/FEVER sessions (M1, M2, F1-F4) with `SEED = 2` and `SEED = 
 
 About 330 GPU hours for both waves.
 
+### Sessions H4-H6 (added 2026-11-26): HateXplain with up to 30 epochs
+
+**Change from the plan above, and why:** H1-H3 (results_v43-v45) trained every model
+for at most 5 epochs, as on USR. HateXplain has 674 updates per epoch (USR: 2,500), and
+in five of the six frozen-generator runs the generator's validation loss was still
+falling at epoch 5 (the sixth flattened after epoch 4; e.g. 0.679 -> 0.627, while the
+fine-tuned A2R reaches 0.567-0.577), so the frozen generator was not trained to
+convergence. The fine-tuned runs had all stopped by
+patience within 5 epochs. `kaggle_run.py` now sets `HX_EPOCHS = 30` (at most 20,220
+updates; patience 2 still decides) and names these runs `hatexplain_<name>_e30_seed<N>`.
+The selection criterion is still the validation loss only (no rationale labels).
+Paste the new `kaggle_run.py` before these sessions; other datasets are unaffected.
+
+| # | DATASET | TRUNCATION | SEED | STAGES | est. time | save as |
+| --- | --- | --- | --- | --- | --- | --- |
+| H4 | `"hatexplain"` | `"right"` | 1 | `["setup", ["a2r", "ni"], ["frozen", "frozen@w3"], "probe", "pack"]` | about 1 h | `results/results_v64` |
+| H5 | `"hatexplain"` | `"right"` | 2 | same as H4 | about 1 h | `results/results_v65` |
+| H6 | `"hatexplain"` | `"right"` | 3 | same as H4 | about 1 h | `results/results_v66` |
+
 ## Round 2 (planned 2026-11-23): experiments 1, 2, 4 and 5
 
 **This replaces "No further runs are planned" below.** Four experiments chosen
